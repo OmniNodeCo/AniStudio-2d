@@ -310,6 +310,18 @@ button.primary {
   min-width: 40px;
   font-size: 13px;
 }
+select.ib {
+  background: #12141d;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--mut);
+  padding: 4px 4px;
+  font-size: 11.5px;
+}
+select.ib:hover {
+  color: var(--txt);
+  border-color: var(--line2);
+}
 .ib.play.on {
   background: rgba(255, 179, 71, 0.14);
   color: var(--warn);

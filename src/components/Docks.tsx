@@ -220,7 +220,7 @@ function ScenePanel() {
           <button
             key={r.id}
             className={`rig-card ${scene.rigId === r.id ? "on" : ""}`}
-            onClick={() => a.loadRig(r.id, false)}
+            onClick={() => (r.id === "blank" ? a.newScene() : a.loadRig(r.id, false))}
             title={r.hint}
           >
             <b>{r.label}</b>

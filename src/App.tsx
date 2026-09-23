@@ -9,9 +9,46 @@ import { parseProject } from "./io/export";
 
 const LS_KEY = "anistudio2d:session:v1";
 
+/**
+ * Playback is a single rAF ticker that only advances `frame`; the canvas and dopesheet react to
+ * that. Frame timing comes from the scene's fps × speed, and an accumulator keeps the cadence even
+ * when a frame takes longer than a step.
+ */
+function usePlayback() {
+  const playing = useStudio((s) => s.playing);
+  const fps = useStudio((s) => s.scene.fps);
+  const speed = useStudio((s) => s.speed);
+  useEffect(() => {
+    if (!playing) return;
+    let raf = 0;
+    let last = performance.now();
+    let acc = 0;
+    const tick = (t: number) => {
+      const s = useStudio.getState();
+      const per = 1000 / Math.max(1, s.scene.fps * s.speed);
+      acc += Math.min(250, t - last);
+      last = t;
+      let guard = 0;
+      while (acc >= per && guard++ < 8) {
+        acc -= per;
+        const cur = useStudio.getState();
+        if (!cur.scene.loop && cur.frame >= cur.scene.frames - 1) {
+          cur.setPlaying(false);
+          break;
+        }
+        cur.setFrame(cur.frame + 1);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing, fps, speed]);
+}
+
 export function App() {
   const toast = useStudio((s) => s.toast);
   const busy = useStudio((s) => s.busy);
+  usePlayback();
   const playing = useStudio((s) => s.playing);
   const [toastGone, setToastGone] = useState(false);
   const saveTimer = useRef<number | null>(null);

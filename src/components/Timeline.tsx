@@ -10,6 +10,8 @@ export function Timeline() {
   const frame = useStudio((s) => s.frame);
   const playing = useStudio((s) => s.playing);
   const autoKey = useStudio((s) => s.autoKey);
+  const mirrorX = useStudio((s) => s.mirrorX);
+  const speed = useStudio((s) => s.speed);
   const keySel = useStudio((s) => s.keySel);
   const selection = useStudio((s) => s.selection);
   const a = useStudio.getState();
@@ -120,6 +122,18 @@ export function Timeline() {
             />
             <span>/ {total}</span>
           </div>
+          <select
+            className="ib"
+            title="Playback speed (the export always renders at 1×)"
+            value={speed}
+            onChange={(e) => a.setSpeed(Number(e.target.value))}
+          >
+            {[0.25, 0.5, 1, 2].map((v) => (
+              <option key={v} value={v}>
+                {v}×
+              </option>
+            ))}
+          </select>
           <label className={`keybtn ${autoKey ? "armed" : ""}`} title="Auto-key: every drag writes a keyframe (A)">
             <input type="checkbox" checked={autoKey} onChange={(e) => a.setAutoKey(e.target.checked)} />
             <span>● auto-key</span>
@@ -128,8 +142,8 @@ export function Timeline() {
             key pose
           </button>
           <button
-            className={`ib wide ${a.mirrorX ? "on" : ""}`}
-            title="Mirror posing across the rig centre"
+            className={`ib wide ${mirrorX ? "on" : ""}`}
+            title="Mirror posing across the rig centre (M)"
             onClick={() => a.toggleFlag("mirrorX")}
           >
             ⇋ mirror
