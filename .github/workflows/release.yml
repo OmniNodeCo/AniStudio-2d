@@ -181,6 +181,20 @@ jobs:
       - name: Install
         run: npm ci --no-audit --no-fund
 
+      # electron-builder names artifacts after package.json's version. Stamp the tag's version so a
+      # v1.0.0 release carries AniStudio-2D-1.0.0-* files instead of whatever package.json said.
+      # Nothing is committed: this only edits the runner's copy of package.json/package-lock.json.
+      - name: Stamp the packaged version from the tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            npm version "$version" --no-git-tag-version --allow-same-version
+          else
+            echo "::warning title=Unstamped version::${TAG} is not a semver tag; installers keep package.json's version."
+          fi
+
       # rpmbuild (the `rpm` package) is what fpm shells out to for the .rpm; xz compresses it.
       - name: Linux packaging and smoke-test dependencies
         if: runner.os == 'Linux'

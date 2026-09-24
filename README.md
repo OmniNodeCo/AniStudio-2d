@@ -176,7 +176,11 @@ npx esbuild scripts/preview.ts --bundle --platform=node --format=esm --external:
   Linux `.AppImage` + `.deb` + `.rpm`, plus `AniStudio-2D-<version>-web.zip`, `preview.png`,
   `SHA256SUMS.txt` and generated release notes with a download table. The release is created as a
   draft, filled with assets, then published — so no download link ever 404s; a platform that fails
-  to package is flagged in the run instead of blocking the others. You can also dispatch it manually
+  to package is flagged in the run instead of blocking the others. Each packaging job stamps the
+  tag's version into `package.json`/`package-lock.json` *on the runner only* (nothing is committed),
+  so a `v1.0.0` tag yields `AniStudio-2D-1.0.0-*` installers even when the checked-in version lags.
+  Re-running for a tag that already has a release replaces its assets and refreshes its notes.
+  You can also dispatch it manually
   with a tag name — it will create the tag on the commit you ran it from, and tags with a hyphen
   after the version (`v0.3.0-beta.1`) are published as pre-releases.
   Set the repository variable `PUBLISH_PAGES=true` (and point Pages at the `gh-pages` branch) to

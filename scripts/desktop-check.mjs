@@ -136,7 +136,7 @@ for (const [label, workflow] of [["build.yml", buildWorkflow], ["release.yml", r
   asserts(label, workflow, "npm run desktop:check");
 }
 // Only the release workflow publishes, and it does so from a draft that is filled first.
-for (const needle of ["gh release create", "gh release upload", "gh release edit", "sha256sum", "assets/*", "out/SHA256SUMS.txt"]) {
+for (const needle of ["gh release create", "gh release upload", "gh release edit", "sha256sum", "assets/*", "out/SHA256SUMS.txt", "npm version \"$version\" --no-git-tag-version"]) {
   asserts("release.yml", releaseWorkflow, needle);
 }
 const uploadIndex = releaseWorkflow.indexOf("gh release upload");
