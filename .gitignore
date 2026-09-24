@@ -8,3 +8,6 @@ test-results/
 
 .tmp/
 .scratch/
+
+# typescript incremental build info
+*.tsbuildinfo

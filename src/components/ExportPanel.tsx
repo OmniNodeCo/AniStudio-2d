@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useStudio } from "../state/store";
+import JSZip from "jszip";
 import { clamp } from "../core/math";
 import { download, exportGif, exportPng, exportPngZip, exportSpriteSheet, exportWebm, projectBlob, type ExportOpts } from "../io/export";
 import { canvasBlob } from "../core/shots";
@@ -56,14 +57,10 @@ export function ExportPanel({ compact = false }: { compact?: boolean }) {
       } else if (kind === "sheet") {
         a.setBusy("Packing sprite sheet…");
         const res = await exportSpriteSheet(scene, opts, cols);
-        const zip = await import("jszip").then(async (JSZipMod) => {
-          const Z = JSZipMod.default;
-          const z = new Z();
-          z.file(`${base}-sheet.png`, res.png);
-          z.file(`${base}-sheet.json`, res.json);
-          return z.generateAsync({ type: "blob" });
-        });
-        download(zip, `${base}-sheet.zip`);
+        const z = new JSZip();
+        z.file(`${base}-sheet.png`, res.png);
+        z.file(`${base}-sheet.json`, res.json);
+        download(await z.generateAsync({ type: "blob" }), `${base}-sheet.zip`);
         a.notify(`Sprite sheet ${res.cols}×${res.rows} of ${res.cw}×${res.ch}px (TexturePacker json)`, "ok");
       } else if (kind === "webm") {
         a.setBusy("Recording WebM in real time…");
