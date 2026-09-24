@@ -294,7 +294,14 @@ jobs:
           shopt -s nullglob
           mkdir -p assets
           mv out/*-web.zip out/preview.png assets/
-          for file in installers/*; do mv "$file" assets/; done
+          # *.blockmap is delta-update metadata for an auto-updater this app does not ship, so it
+          # stays in the Actions artifacts and off the release page.
+          for file in installers/*; do
+            case "$file" in
+              *.blockmap) ;;
+              *) mv "$file" assets/ ;;
+            esac
+          done
           ls -l assets
           if [ "$DESKTOP_RESULT" != "success" ]; then
             echo "::warning title=Partial release::The desktop matrix reported '$DESKTOP_RESULT', so this release carries only the platforms that packaged successfully. Re-run the workflow to fill in the rest."
