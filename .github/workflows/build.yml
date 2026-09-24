@@ -1,9 +1,10 @@
 name: Build
 
 # Every push to main and every pull request: typecheck, run the headless checks that cover the
-# animation core (store, exports, hit-testing/IK), bundle the app and smoke-test the built site.
-# After verification the desktop shell is packaged into installers for
-# Linux / Windows / macOS on three parallel runners — see the `desktop` job.
+# animation core (store, exports, hit-testing/IK, set/camera), bundle the app and smoke-test the
+# built site. After verification the desktop shell is packaged on three parallel runners into the
+# same installers release.yml publishes — Windows setup + portable, macOS dmg + zip, Linux
+# AppImage + deb + rpm — see the `desktop` job.
 
 on:
   push:
@@ -124,18 +125,21 @@ jobs:
           - label: linux
             os: ubuntu-24.04
             script: dist:linux
+            expect: "*.AppImage *.deb *.rpm"
             cache: |
               ~/.cache/electron
               ~/.cache/electron-builder
           - label: windows
             os: windows-latest
             script: dist:win
+            expect: "*-setup.exe *-portable.exe"
             cache: |
               ~/AppData/Local/electron/Cache
               ~/AppData/Local/electron-builder/Cache
           - label: macos
             os: macos-latest
             script: dist:mac
+            expect: "*.dmg *.zip"
             cache: |
               ~/Library/Caches/electron
               ~/Library/Caches/electron-builder
@@ -162,12 +166,38 @@ jobs:
       - name: Install
         run: npm ci --no-audit --no-fund
 
+      # rpmbuild (the `rpm` package) is what fpm shells out to for the .rpm; xz compresses it.
       - name: Linux packaging and smoke-test dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libarchive-tools xvfb xauth libgtk-3-0t64 libnss3 libasound2t64
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libarchive-tools xvfb xauth libgtk-3-0t64 libnss3 libasound2t64 rpm xz-utils
 
       - name: Build the site and package it
         run: npm run ${{ matrix.script }}
+
+      # "Packaging succeeded" is not the same as "the file we promise exists" — assert both.
+      # Patterns go through `read -a` (word splitting without pathname expansion) and `find`: with
+      # `nullglob` set, a `for pattern in *.rpm` word list would itself be glob-expanded and quietly
+      # drop the patterns that matched nothing — which is precisely the case this step must catch.
+      - name: Check the expected installers were produced
+        shell: bash
+        env:
+          EXPECT: ${{ matrix.expect }}
+        run: |
+          set -euo pipefail
+          read -ra patterns <<< "$EXPECT"
+          missing=0
+          for pattern in "${patterns[@]}"; do
+            found=""
+            for file in $(find release -maxdepth 1 -type f -name "$pattern" | sort); do
+              printf '  %-52s %s\n' "$file" "$(du -h "$file" | cut -f1)"
+              found=yes
+            done
+            if [ -z "$found" ]; then
+              echo "::error::packaging produced no release/$pattern"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
 
       - name: Smoke-test the packaged Linux app
         if: runner.os == 'Linux'
@@ -179,10 +209,13 @@ jobs:
         with:
           name: anistudio-2d-desktop-${{ matrix.label }}
           path: |
+            release/*-setup.exe
+            release/*-portable.exe
+            release/*.dmg
+            release/*.zip
             release/*.AppImage
             release/*.deb
-            release/*.exe
-            release/*.dmg
+            release/*.rpm
             release/*.blockmap
           if-no-files-found: error
           retention-days: 14

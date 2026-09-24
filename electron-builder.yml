@@ -14,6 +14,7 @@ files:
 asar: true
 npmRebuild: false
 
+# Windows: an NSIS installer (`-setup.exe`) plus a single-file portable executable.
 win:
   target:
     - target: nsis
@@ -30,6 +31,8 @@ nsis:
 portable:
   artifactName: AniStudio-2D-${version}-windows-${arch}-portable.${ext}
 
+# macOS: DMGs for Apple silicon and Intel plus a portable zip of the same `.app`. Squirrel.Mac —
+# and anyone who would rather not mount a disk image — wants the zip to exist too.
 # CI deliberately builds unsigned apps. Signing/notarization needs separate credentials/config.
 mac:
   # Ad-hoc signing supports Apple silicon without a Developer ID certificate.
@@ -37,22 +40,26 @@ mac:
   hardenedRuntime: false
   notarize: false
   category: public.app-category.graphics-design
+  # One name for every macOS target; `${ext}` resolves to dmg or zip.
+  artifactName: AniStudio-2D-${version}-macos-${arch}.${ext}
   target:
     - target: dmg
       arch: [arm64, x64]
-dmg:
-  artifactName: AniStudio-2D-${version}-macos-${arch}.${ext}
+    - target: zip
+      arch: [arm64, x64]
 
+# Linux: a portable AppImage, a Debian/Ubuntu `.deb` and a Fedora/RHEL `.rpm`.
+# Building the rpm needs `rpmbuild` (the `rpm` package) on the packaging machine.
 linux:
   category: Graphics
   synopsis: 2D animation studio with inverse kinematics
+  description: Drag-and-drop 2D animation studio with inverse kinematics, cameras, lights and scenery.
   maintainer: OmniNodeCo <OmniNodeCo@users.noreply.github.com>
+  artifactName: AniStudio-2D-${version}-linux-${arch}.${ext}
   target:
     - target: AppImage
       arch: [x64]
     - target: deb
       arch: [x64]
-appImage:
-  artifactName: AniStudio-2D-${version}-linux-${arch}.${ext}
-deb:
-  artifactName: AniStudio-2D-${version}-linux-${arch}.${ext}
+    - target: rpm
+      arch: [x64]

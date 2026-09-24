@@ -91,4 +91,58 @@ async function check(platform, smokeTest = false, rendered = true) {
 for (const platform of ["linux", "win32", "darwin"]) await check(platform);
 await check("linux", true, true);
 await check("linux", true, false);
-console.log("All desktop shell checks passed (stubbed Electron API)");
+
+// The installers a release advertises are configured in three places that can drift apart:
+// electron-builder's targets, the `dist:*` npm scripts, and the two workflows that carry the files
+// to a release. Pin them to each other so a rename cannot quietly drop a platform from a release.
+const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+const builderConfig = read("../electron-builder.yml");
+const releaseWorkflow = read("../.github/workflows/release.yml");
+const buildWorkflow = read("../.github/workflows/build.yml");
+const { scripts } = JSON.parse(read("../package.json"));
+
+function asserts(label, text, needle) {
+  assert.ok(text.includes(needle), `${label} no longer mentions ${JSON.stringify(needle)}`);
+}
+
+// Each target we ship, and the file name electron-builder gives it (${...} is literal here).
+for (const target of ["nsis", "portable", "dmg", "zip", "AppImage", "deb", "rpm"]) {
+  asserts("electron-builder.yml", builderConfig, `target: ${target}`);
+}
+for (const artifactName of [
+  "AniStudio-2D-${version}-windows-${arch}-setup.${ext}",
+  "AniStudio-2D-${version}-windows-${arch}-portable.${ext}",
+  "AniStudio-2D-${version}-macos-${arch}.${ext}",
+  "AniStudio-2D-${version}-linux-${arch}.${ext}",
+]) {
+  asserts("electron-builder.yml", builderConfig, artifactName);
+}
+assert.match(scripts["dist:win"], /--win nsis portable/, "dist:win must build the setup and portable executables");
+assert.match(scripts["dist:mac"], /--mac dmg zip/, "dist:mac must build the dmg and the portable zip");
+assert.match(scripts["dist:linux"], /--linux AppImage deb rpm/, "dist:linux must build AppImage, deb and rpm");
+
+for (const [label, workflow] of [["build.yml", buildWorkflow], ["release.yml", releaseWorkflow]]) {
+  // Upload globs: the four families of file a release carries.
+  for (const glob of ["release/*-setup.exe", "release/*-portable.exe", "release/*.dmg", "release/*.zip", "release/*.AppImage", "release/*.deb", "release/*.rpm"]) {
+    asserts(label, workflow, glob);
+  }
+  // Per-platform expectations, so "packaging exited 0" is never mistaken for "the file exists".
+  for (const expect of ["*-setup.exe *-portable.exe", "*.dmg *.zip", "*.AppImage *.deb *.rpm"]) {
+    asserts(label, workflow, expect);
+  }
+  for (const script of ["dist:win", "dist:mac", "dist:linux"]) {
+    asserts(label, workflow, script);
+  }
+  asserts(label, workflow, "npm run desktop:check");
+}
+// Only the release workflow publishes, and it does so from a draft that is filled first.
+for (const needle of ["gh release create", "gh release upload", "gh release edit", "sha256sum", "assets/*", "out/SHA256SUMS.txt"]) {
+  asserts("release.yml", releaseWorkflow, needle);
+}
+const uploadIndex = releaseWorkflow.indexOf("gh release upload");
+assert.ok(
+  uploadIndex !== -1 && uploadIndex < releaseWorkflow.indexOf("--draft=false"),
+  "release.yml must attach the assets before it publishes the release",
+);
+console.log(`packaging wiring: 7 targets, 4 artifact names, 2 workflows agree on setup/portable/dmg/zip/AppImage/deb/rpm`);
+console.log("All desktop shell checks passed (stubbed Electron API + workflow wiring)");

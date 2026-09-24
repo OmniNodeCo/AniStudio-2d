@@ -1,13 +1,27 @@
 name: Release
 
 # Tag a commit `v0.2.0` (or run this workflow manually with a tag name) and you get a GitHub
-# Release carrying the built, ready-to-open web app plus a preview still. Nothing is published on
-# `main` — a release is an explicit act.
+# Release carrying everything a person can actually run:
+#
+#   Windows  AniStudio-2D-<v>-windows-x64-setup.exe      NSIS installer
+#            AniStudio-2D-<v>-windows-x64-portable.exe   single file, no install
+#   macOS    AniStudio-2D-<v>-macos-arm64.dmg / -x64.dmg  Apple silicon + Intel installers
+#            AniStudio-2D-<v>-macos-arm64.zip / -x64.zip  portable app bundle
+#   Linux    AniStudio-2D-<v>-linux-x64.AppImage          portable
+#            AniStudio-2D-<v>-linux-x64.deb               Debian / Ubuntu
+#            AniStudio-2D-<v>-linux-x64.rpm               Fedora / RHEL / openSUSE
+#   Any OS   AniStudio-2D-<v>-web.zip                     unzip and open index.html
+#
+# Installers are built natively on their own runner (you cannot cross-build a dmg), so the release
+# job waits for all three and then attaches them — plus SHA256SUMS.txt — to one release. A failed
+# platform does not throw away the others; the run is flagged and the release goes out with what
+# built. Nothing is published on `main` — a release is an explicit act.
 #
 #   git tag -a v0.2.0 -m "..." && git push origin v0.2.0
 #
 # Manual dispatch: pass a tag that does not exist yet and it will be created on the commit you
-# dispatch from, so you can cut a release from the Actions UI alone.
+# dispatch from, so you can cut a release from the Actions UI alone. Tags with a hyphen after the
+# version (v0.3.0-beta.1) are published as pre-releases.
 
 on:
   push:
@@ -34,10 +48,15 @@ env:
   TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
-  release:
-    name: Verify, bundle, publish
+  # Gate: a release that does not pass the same checks CI runs on every push should not exist.
+  verify:
+    name: Verify · bundle · web zip
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -52,7 +71,9 @@ jobs:
       - name: Install
         run: npm ci --no-audit --no-fund
 
-      # A release that does not pass the same checks CI runs on every push should not exist.
+      - name: Desktop shell checks
+        run: npm run desktop:check
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -60,7 +81,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .tmp
-          for check in store-check export-check interact-check; do
+          for check in store-check export-check interact-check scene-check; do
             npm exec --silent -- esbuild "scripts/$check.ts" --bundle --platform=node --format=cjs \
               --external:@napi-rs/canvas --outfile=".tmp/$check.cjs" --log-level=warning
             node ".tmp/$check.cjs" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -76,6 +97,7 @@ jobs:
           node .tmp/preview.mjs kid,cat,ninja,robot,dragon,bird,wizard,blob 0,6,12 .tmp/preview.png 0 1 300 260
 
       - name: Zip the site
+        id: version
         run: |
           set -euo pipefail
           version="${TAG#v}"
@@ -84,32 +106,194 @@ jobs:
           (cd dist && zip -qr "../out/AniStudio-2D-${version}-web.zip" .)
           cp .tmp/preview.png out/preview.png
           ls -l out
-          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Write the release notes
+      - name: Upload the web bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-web
+          path: out
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload dist for the pages job
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
+  # Native packaging, one runner per OS. Each console keeps its own job so a macOS-only failure
+  # still leaves Windows and Linux downloads on the release.
+  desktop:
+    name: Installers · ${{ matrix.label }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: windows
+            os: windows-latest
+            script: dist:win
+            expect: "*-setup.exe *-portable.exe"
+            cache: |
+              ~/AppData/Local/electron/Cache
+              ~/AppData/Local/electron-builder/Cache
+          - label: macos
+            os: macos-latest
+            script: dist:mac
+            expect: "*.dmg *.zip"
+            cache: |
+              ~/Library/Caches/electron
+              ~/Library/Caches/electron-builder
+          - label: linux
+            os: ubuntu-24.04
+            script: dist:linux
+            expect: "*.AppImage *.deb *.rpm"
+            cache: |
+              ~/.cache/electron
+              ~/.cache/electron-builder
+    env:
+      # Unsigned CI artifacts; signing requires separately configured certificates/notarization.
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # The Electron runtime (~100 MB per OS) plus nsis/fpm helpers: cached between runs, keyed on
+      # the lockfile, because re-downloading them is most of this job's wall time.
+      - name: Cache Electron downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ matrix.cache }}
+          key: electron-${{ matrix.label }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: electron-${{ matrix.label }}-
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      # rpmbuild (the `rpm` package) is what fpm shells out to for the .rpm; xz compresses it.
+      - name: Linux packaging and smoke-test dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libarchive-tools xvfb xauth libgtk-3-0t64 libnss3 libasound2t64 rpm xz-utils
+
+      - name: Build the site and package it
+        run: npm run ${{ matrix.script }}
+
+      # "Packaging succeeded" is not the same as "the file we promise exists" — assert both.
+      # Patterns go through `read -a` (word splitting without pathname expansion) and `find`: with
+      # `nullglob` set, a `for pattern in *.rpm` word list would itself be glob-expanded and quietly
+      # drop the patterns that matched nothing — which is precisely the case this step must catch.
+      - name: Check the expected installers were produced
+        shell: bash
+        env:
+          EXPECT: ${{ matrix.expect }}
         run: |
           set -euo pipefail
-          {
-            echo "Drag-and-drop 2D animation studio: weld vector parts onto bones, pose with IK, and every drag"
-            echo "is baked into keyframes for you. Built with React + TypeScript on a canvas, no runtime services."
-            echo
-            echo "![AniStudio 2D — kid walk, robot wave, dragon flight, blob bounce](https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/preview.png)"
-            echo
-            echo "## Run it"
-            echo
-            echo "- **Just want to animate:** unzip \`AniStudio-2D-${VERSION}-web.zip\` and open \`index.html\`."
-            echo "- **From source:** \`git checkout ${TAG} && npm ci && npm run dev\` (Node ${NODE_VERSION})."
-            echo
-            echo "## Commits since the last release"
-            echo
-            gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-              -f tag_name="${TAG}" -q .body 2>/dev/null || echo "_first release — see the commit history._"
-          } > out/notes.md
-          cat out/notes.md >> "$GITHUB_STEP_SUMMARY"
+          read -ra patterns <<< "$EXPECT"
+          missing=0
+          for pattern in "${patterns[@]}"; do
+            found=""
+            for file in $(find release -maxdepth 1 -type f -name "$pattern" | sort); do
+              printf '  %-52s %s\n' "$file" "$(du -h "$file" | cut -f1)"
+              found=yes
+            done
+            if [ -z "$found" ]; then
+              echo "::error::packaging produced no release/$pattern"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
 
-      - name: Create or update the release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Smoke-test the packaged Linux app
+        if: runner.os == 'Linux'
+        # --no-sandbox is confined to the headless CI runner, never enabled by the app itself.
+        run: timeout 60s xvfb-run -a release/linux-unpacked/anistudio-2d --no-sandbox --smoke-test
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: anistudio-2d-desktop-${{ matrix.label }}
+          path: |
+            release/*-setup.exe
+            release/*-portable.exe
+            release/*.dmg
+            release/*.zip
+            release/*.AppImage
+            release/*.deb
+            release/*.rpm
+            release/*.blockmap
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  # One job finishes the job: collect every platform's files, checksum them, write the notes and
+  # publish. Doing it here (instead of three parallel jobs uploading to a release) means the
+  # release appears once, complete, and a re-run replaces assets instead of racing them.
+  release:
+    name: Publish the release
+    needs: [verify, desktop]
+    # Still publish the web zip + whichever platforms did build, rather than nothing at all.
+    if: ${{ !cancelled() && needs.verify.result == 'success' }}
+    runs-on: ubuntu-latest
+    # Uploading three platforms' installers to the release takes a while at ~1 GB total.
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ needs.verify.outputs.version }}
+      DESKTOP_RESULT: ${{ needs.desktop.result }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download the web bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: release-web
+          path: out
+
+      # Tolerated, not required: if every platform failed there is nothing to download, and the
+      # web zip is still worth publishing.
+      - name: Download the installers
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: anistudio-2d-desktop-*
+          merge-multiple: true
+          path: installers
+
+      - name: Collect the release assets
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p assets
+          mv out/*-web.zip out/preview.png assets/
+          for file in installers/*; do mv "$file" assets/; done
+          ls -l assets
+          if [ "$DESKTOP_RESULT" != "success" ]; then
+            echo "::warning title=Partial release::The desktop matrix reported '$DESKTOP_RESULT', so this release carries only the platforms that packaged successfully. Re-run the workflow to fill in the rest."
+          fi
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd assets
+          find . -maxdepth 1 -type f -printf '%f\n' | sort | xargs -r -d '\n' sha256sum > ../out/SHA256SUMS.txt
+          cat ../out/SHA256SUMS.txt
+
+      - name: Create the tag if the dispatch asked for a new one
         run: |
           set -euo pipefail
           if ! git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
@@ -118,26 +302,98 @@ jobs:
             git tag -a "${TAG}" -m "AniStudio 2D ${TAG}"
             git push origin "refs/tags/${TAG}"
           fi
-          if gh release view "${TAG}" >/dev/null 2>&1; then
-            gh release edit "${TAG}" --title "AniStudio 2D ${VERSION}" --notes-file out/notes.md
-          else
-            gh release create "${TAG}" --title "AniStudio 2D ${VERSION}" --notes-file out/notes.md --latest
-          fi
-          gh release upload "${TAG}" "out/AniStudio-2D-${VERSION}-web.zip" out/preview.png --clobber
-          echo "[AniStudio 2D ${VERSION}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}) published" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload dist for the pages job
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-dist
-          path: dist
+      - name: Write the release notes
+        run: |
+          set -euo pipefail
+          repo_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          row() {
+            # $1 platform label · $2 glob in assets/ · $3 how to install it
+            local path name
+            for path in assets/$2; do
+              [ -e "$path" ] || continue
+              name="${path#assets/}"
+              printf '| %s | [%s](%s/%s) | %s |\n' "$1" "$name" "$repo_url" "$name" "$3"
+            done
+          }
+          {
+            echo 'Drag-and-drop 2D animation studio: weld vector parts onto bones, pose with IK, and every drag'
+            echo 'is baked into keyframes for you. Built with React + TypeScript on a canvas, no runtime services.'
+            echo
+            echo "![AniStudio 2D — kid walk, robot wave, dragon flight, blob bounce](${repo_url}/preview.png)"
+            echo
+            echo '## Download'
+            echo
+            echo '| Platform | File | Install |'
+            echo '| --- | --- | --- |'
+            row 'Windows · installer' '*-windows-*-setup.exe' 'Run the setup — per-user, you pick the folder, Start-menu shortcut included.'
+            row 'Windows · portable' '*-windows-*-portable.exe' 'One executable, nothing installed.'
+            row 'macOS · Apple silicon' '*-macos-arm64.dmg' 'Open the disk image, drag AniStudio 2D into Applications.'
+            row 'macOS · Intel' '*-macos-x64.dmg' 'Open the disk image, drag AniStudio 2D into Applications.'
+            row 'macOS · portable' '*-macos-*.zip' 'Unzip and run the app bundle from anywhere.'
+            row 'Linux · AppImage' '*.AppImage' 'chmod +x then run it — no install.'
+            row 'Linux · Debian · Ubuntu' '*.deb' 'sudo apt install ./<file>'
+            row 'Linux · Fedora · RHEL · openSUSE' '*.rpm' 'sudo dnf install ./<file>  (or zypper install --allow-unsigned-rpm)'
+            row 'Any OS · browser build' '*-web.zip' 'Unzip and open index.html — no install, no server.'
+            echo
+            echo "Every file above is listed in [\`SHA256SUMS.txt\`](${repo_url}/SHA256SUMS.txt):"
+            echo
+            echo '```sh'
+            echo 'sha256sum -c SHA256SUMS.txt        # Linux'
+            echo 'shasum -a 256 -c SHA256SUMS.txt    # macOS'
+            echo '```'
+            echo
+            echo '## First launch'
+            echo
+            echo '- These builds are **unsigned**: there is no Developer ID or code-signing certificate behind them.'
+            echo '- macOS may say the app is from an unidentified developer (or is damaged). Right-click → **Open**, or run `xattr -dr com.apple.quarantine "/Applications/AniStudio 2D.app"`. The DMGs are ad-hoc signed, which is what Apple silicon needs after that override.'
+            echo '- Windows SmartScreen → **More info** → **Run anyway**.'
+            echo '- Some distributions need FUSE for AppImage; `--appimage-extract-and-run` works without it.'
+            echo '- The `.rpm` is unsigned, so `dnf` may ask you to confirm the package (`--nogpgcheck` on older releases).'
+            echo
+            echo "From source: \`git checkout ${TAG} && npm ci && npm run dev\` (Node ${NODE_VERSION})."
+            echo
+            echo '## Commits since the last release'
+            echo
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="${TAG}" -q .body 2>/dev/null || echo '_first release — see the commit history._'
+          } > out/notes.md
+          cat out/notes.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Draft first: assets are attached before the release is visible, so no download link 404s.
+      - name: Publish
+        run: |
+          set -euo pipefail
+          title="AniStudio 2D ${VERSION}"
+          prerelease=""
+          case "${VERSION}" in *-*) prerelease="1" ;; esac
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            # Re-running for an existing tag: replace the assets and refresh the notes.
+            gh release upload "${TAG}" assets/* out/SHA256SUMS.txt --clobber
+            gh release edit "${TAG}" --title "${title}" --notes-file out/notes.md
+            echo "Updated the existing release ${TAG}."
+          else
+            gh release create "${TAG}" --draft --title "${title}" --notes-file out/notes.md
+            gh release upload "${TAG}" assets/* out/SHA256SUMS.txt
+            if [ -n "$prerelease" ]; then
+              gh release edit "${TAG}" --draft=false
+            else
+              gh release edit "${TAG}" --draft=false --latest
+            fi
+            echo "Published ${TAG}."
+          fi
+          {
+            echo "### Assets on [${TAG}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG})"
+            echo
+            ls -lh assets/ | tail -n +2 | awk '{ printf "- `%s` — %s\n", $9, $5 }'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   pages:
     name: Publish the app to gh-pages
     needs: release
     # Opt-in: set the repository variable PUBLISH_PAGES to "true", and point GitHub Pages at the
     # `gh-pages` branch (Settings → Pages → Source: Deploy from a branch). Then releases go live.
-    if: ${{ vars.PUBLISH_PAGES == 'true' }}
+    if: ${{ needs.release.result == 'success' && vars.PUBLISH_PAGES == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

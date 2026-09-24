@@ -159,19 +159,26 @@ npx esbuild scripts/preview.ts --bundle --platform=node --format=esm --external:
   | Artifact | Contents |
   | --- | --- |
   | `anistudio-2d-desktop-windows` | x64 NSIS setup `.exe` and portable `.exe` |
-  | `anistudio-2d-desktop-linux` | x64 `.AppImage` and `.deb` |
-  | `anistudio-2d-desktop-macos` | Apple silicon (arm64) and Intel (x64) `.dmg` |
+  | `anistudio-2d-desktop-linux` | x64 `.AppImage`, `.deb` and `.rpm` |
+  | `anistudio-2d-desktop-macos` | Apple silicon (arm64) and Intel (x64) `.dmg` + portable `.zip` |
 
-  These builds are not publisher-signed (macOS uses ad-hoc signing) and are retained for 14 days.
+  Each job asserts the installers it promised actually exist (`*.rpm`, `*-setup.exe`, …), not just
+  that packaging exited 0. These builds are not publisher-signed (macOS uses ad-hoc signing) and are
+  retained for 14 days.
   Windows SmartScreen and macOS Gatekeeper
   may warn or block launch; Developer ID signing/notarization is not configured. For AppImage, first run
   `chmod +x AniStudio-2D-*.AppImage`; some Linux distributions require FUSE/user-namespace setup.
   The app keeps Chromium's sandbox enabled; it is disabled only for the headless CI smoke test.
 - **`.github/workflows/release.yml`** — push a tag (`git tag -a v0.2.0 -m "..." && git push origin v0.2.0`)
-  and it re-runs the checks (a release never ships on an unverified commit), zips the static build,
-  renders a preview still, and publishes a GitHub Release with `AniStudio-2D-<version>-web.zip` +
-  `preview.png` and generated notes. You can also dispatch it manually with a tag name — it will
-  create the tag on the commit you ran it from.
+  and it re-runs the checks (a release never ships on an unverified commit), then **builds the same
+  installers on Windows, macOS and Linux runners and publishes them with the web build** on one
+  GitHub Release: Windows setup + portable `.exe`, macOS `.dmg` and portable `.zip` for arm64/x64,
+  Linux `.AppImage` + `.deb` + `.rpm`, plus `AniStudio-2D-<version>-web.zip`, `preview.png`,
+  `SHA256SUMS.txt` and generated release notes with a download table. The release is created as a
+  draft, filled with assets, then published — so no download link ever 404s; a platform that fails
+  to package is flagged in the run instead of blocking the others. You can also dispatch it manually
+  with a tag name — it will create the tag on the commit you ran it from, and tags with a hyphen
+  after the version (`v0.3.0-beta.1`) are published as pre-releases.
   Set the repository variable `PUBLISH_PAGES=true` (and point Pages at the `gh-pages` branch) to
   also push each release's site to Pages.
 
@@ -182,9 +189,9 @@ Use Node 22.12+ and run on the target OS (macOS packaging requires a Mac):
 ```bash
 npm ci
 npm run desktop        # build the web renderer, then launch it in Electron
-npm run dist:win       # Windows: NSIS installer + portable executable
-npm run dist:linux     # Linux: AppImage + Debian package
-npm run dist:mac       # macOS: DMGs for arm64 + x64
+npm run dist:win       # Windows: NSIS setup .exe + portable .exe
+npm run dist:linux     # Linux: AppImage + .deb + .rpm (needs the `rpm` package for rpmbuild)
+npm run dist:mac       # macOS: .dmg + portable .zip, arm64 + x64
 npm run desktop:check # shell unit checks using a stubbed Electron API
 ```
 
@@ -192,8 +199,11 @@ Output goes to the ignored `release/` directory. `electron-builder.yml` configur
 `electron/main.mjs` loads the bundled studio without a dev server, with Node integration off,
 context isolation and sandboxing on. Existing project imports and export downloads work through
 Chromium; exports get a native save dialog. Regenerate the icon with `node scripts/make-icon.mjs`.
-Packaging scripts use `--publish never`: **build.yml uploads Actions artifacts only**; the existing
-`release.yml` still publishes its web zip and preview, not the desktop installers.
+Packaging scripts use `--publish never`, so **nothing is pushed from a build**: `build.yml` keeps
+the installers as Actions artifacts for every push and PR, and `release.yml` attaches them to the
+GitHub Release when you tag. `npm run desktop:check` also asserts that this wiring stays in place —
+electron-builder targets, the `dist:*` scripts and both workflows' upload globs all have to mention
+the setup/portable/dmg/zip/AppImage/deb/rpm files.
 
 Node 22 is what CI uses (`vite 7` needs Node ≥ 20.19).
 
