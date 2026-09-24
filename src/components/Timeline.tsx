@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useStudio } from "../state/store";
+import { cameraTrack, useStudio } from "../state/store";
 import { clamp, deg, rad, EASES, type Ease } from "../core/math";
 import { indexScene } from "../core/rig";
-import { PALETTES } from "../core/types";
+import { mainCamera, shotAt } from "../core/timeline";
+import { PALETTES, type Camera } from "../core/types";
 
 /** Transport + dopesheet: the whole animation as one row of keys per bone. */
 export function Timeline() {
@@ -25,6 +26,8 @@ export function Timeline() {
   const rows = useMemo(() => indexScene(scene).order, [scene]);
   const total = scene.frames;
   const width = total * ppf;
+  /** Camera that owns the timeline (its shots drive framing and looping). */
+  const mainCam = useMemo(() => mainCamera(scene), [scene]);
 
   // keep the playhead in view while playing
   useEffect(() => {
@@ -63,7 +66,7 @@ export function Timeline() {
 
   const beginKeyDrag = (e: React.PointerEvent, bone: string, t: number, additive: boolean) => {
     e.stopPropagation();
-    const frames = additive && keySel?.bone === bone ? Array.from(new Set([...keySel.frames, t])) : [t];
+    const frames = additive && keySel?.track === bone ? Array.from(new Set([...keySel.frames, t])) : [t];
     a.setKeySel(bone, frames);
     keyDragRef.current = { bone, frames, startX: e.clientX, delta: 0 };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -87,7 +90,12 @@ export function Timeline() {
     if (e.type === "pointerup" && d.delta !== 0) a.moveSelectedKeys(d.delta);
   };
 
-  const selectedEase: Ease | null = keySel ? (scene.tracks[keySel.bone]?.rot.find((k) => k.t === keySel.frames[0])?.ease ?? null) : null;
+  const camId = keySel ? cameraTrack(keySel.track) : null;
+  const selectedEase: Ease | null = !keySel
+    ? null
+    : camId
+      ? (scene.cameras?.find((c) => c.id === camId)?.keys.find((k) => k.t === keySel.frames[0])?.ease ?? null)
+      : (scene.tracks[keySel.track]?.rot.find((k) => k.t === keySel.frames[0])?.ease ?? null);
 
   return (
     <section className="timeline">
@@ -148,6 +156,16 @@ export function Timeline() {
           >
             ⇋ mirror
           </button>
+          <button
+            className={`ib wide ${mainCam ? "on" : ""}`}
+            title="Add a camera (frames the stage and gives you shots)"
+            onClick={() => a.addCamera()}
+          >
+            🎥 camera
+          </button>
+          <button className="ib wide" title="Start a new shot here — the timeline will loop inside it" onClick={() => a.addShot()}>
+            ✂ shot
+          </button>
         </div>
 
         <div className="tl-right">
@@ -207,7 +225,9 @@ export function Timeline() {
             <span className="playhead" style={{ left: LABEL_W + frame * ppf + ppf / 2 - 0.5 }} />
           </div>
 
-          {rows.map((b) => {
+          {mainCam && <ShotStrip cam={mainCam} ppf={ppf} onPickKey={beginKeyDrag} />}
+
+        {rows.map((b) => {
             const tr = scene.tracks[b.id];
             const keys = tr?.rot ?? [];
             const posKeys = tr?.pos ?? [];
@@ -235,7 +255,7 @@ export function Timeline() {
                 >
                   <span className="cur-line" style={{ left: LABEL_W + frame * ppf + ppf / 2 - 0.5, width: 1 }} />
                   {keys.map((k) => {
-                    const isSel = keySel?.bone === b.id && keySel.frames.includes(k.t);
+                    const isSel = keySel?.track === b.id && keySel.frames.includes(k.t);
                     const moving = keyDragRef.current?.bone === b.id && keyDragRef.current.frames.includes(k.t) ? keyDelta : 0;
                     const x = (k.t + moving) * ppf + ppf / 2;
                     return (
@@ -285,12 +305,65 @@ export function Timeline() {
               </div>
             );
           })}
+
+          {(scene.cameras ?? []).map((cam) => {
+            const isActive = scene.activeCamera === cam.id;
+            const track = `cam:${cam.id}`;
+            return (
+              <div key={cam.id} className={`row cam-row ${isActive ? "sel" : ""}`} style={{ height: rowH }}>
+                <button
+                  className="row-label"
+                  onClick={() => {
+                    a.setActiveCamera(cam.id);
+                    a.select("camera", cam.id);
+                  }}
+                  title={`${cam.name} — click to look through it`}
+                >
+                  🎥 {cam.name}
+                  {cam.keys.length ? <em>{cam.keys.length} keys</em> : <em>locked off</em>}
+                </button>
+                <div className="cells" onPointerDown={(e) => (e.shiftKey ? a.deleteCameraKey(cam.id, frameAt(e.clientX)) : a.select("camera", cam.id))}>
+                  <span className="cur-line" style={{ left: LABEL_W + frame * ppf + ppf / 2 - 0.5, width: 1 }} />
+                  {cam.keys.map((k) => {
+                    const isSel = keySel?.track === track && keySel.frames.includes(k.t);
+                    const moving = keyDragRef.current?.bone === track && keyDragRef.current.frames.includes(k.t) ? keyDelta : 0;
+                    return (
+                      <button
+                        key={`c${k.t}`}
+                        className={`key cam ${isSel ? "sel" : ""}`}
+                        style={{ left: (k.t + moving) * ppf + ppf / 2 }}
+                        title={`camera key @${k.t} · zoom ${k.zoom.toFixed(2)}× · ease ${k.ease}\nDrag to move · shift-drag to multi-select · right-click to delete`}
+                        onPointerDown={(e) => beginKeyDrag(e, track, k.t, e.shiftKey)}
+                        onPointerMove={moveKeyDrag}
+                        onPointerUp={endKeyDrag}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          a.deleteCameraKey(cam.id, k.t);
+                        }}
+                      />
+                    );
+                  })}
+                  <button
+                    className={`add-key ${cam.keys.some((k) => k.t === frame) ? "has" : ""}`}
+                    style={{ left: clamp(frame * ppf + ppf / 2, 0, width) }}
+                    title="Key the camera at this frame (K with the camera selected)"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      a.keyCamera(cam.id, frame);
+                    }}
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
 
       <footer className="tl-foot">
         <span className="muted">
-          {countKeys(scene)} keys · {rows.length} bones · shift-drag keys to select · right-click a key to delete
+          {countKeys(scene)} keys · {rows.length} bones · {(scene.cameras ?? []).length} camera(s) · shift-drag keys to select · right-click a key to delete
         </span>
         <span className="muted">
           palettes:{" "}
@@ -327,3 +400,90 @@ function countKeys(scene: Parameters<typeof indexScene>[0]): number {
 /** Degrees helpers used by the inspector. */
 export const d2r = rad;
 export const r2d = deg;
+
+
+/* ------------------------------------------------------------ shot strip */
+
+/**
+ * One row of shot blocks for the framing camera. Drag the edges to re-time a take; the timeline
+ * loops inside whichever shot the playhead is in, which is why this lives above the keys.
+ */
+function ShotStrip({ cam, ppf, onPickKey }: { cam: Camera; ppf: number; onPickKey: (e: React.PointerEvent, track: string, t: number, additive: boolean) => void }) {
+  const frame = useStudio((s) => s.frame);
+  const a = useStudio.getState();
+  const dragRef = useRef<null | { index: number; edge: "start" | "end"; start: number; startX: number }>(null);
+  const [, force] = useState(0);
+
+  const begin = (e: React.PointerEvent, index: number, edge: "start" | "end") => {
+    e.stopPropagation();
+    const shot = cam.shots[index];
+    dragRef.current = { index, edge, start: edge === "start" ? shot.start : shot.end, startX: e.clientX };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  };
+  const move = (e: React.PointerEvent) => {
+    const d = dragRef.current;
+    if (!d) return;
+    const delta = Math.round((e.clientX - d.startX) / ppf);
+    if (delta !== 0) force((n) => n + 1);
+    a.updateShot(cam.id, d.index, d.edge === "start" ? { start: d.start + delta } : { end: d.start + delta });
+  };
+  const end = () => {
+    dragRef.current = null;
+    force((n) => n + 1);
+  };
+
+  const active = shotAt(cam, frame);
+  return (
+    <div className="row shot-row">
+      <button className="row-label" onClick={() => a.setActiveCamera(cam.id)} title="Shots of the active camera">
+        🎬 {cam.name} shots
+      </button>
+      <div className="cells">
+        {cam.shots.map((sh, i) => {
+          const on = active === sh;
+          return (
+            <div
+              key={i}
+              className={`shot ${on ? "on" : ""}`}
+              style={{ left: sh.start * ppf, width: Math.max(6, (sh.end - sh.start + 1) * ppf) }}
+              title={`Shot ${i + 1}: frames ${sh.start}–${sh.end} · drag the edges to re-time · double-click to cut to it`}
+              onDoubleClick={() => {
+                a.setActiveCamera(cam.id);
+                a.setFrame(sh.start);
+              }}
+            >
+              <span
+                className="shot-edge left"
+                onPointerDown={(e) => begin(e, i, "start")}
+                onPointerMove={move}
+                onPointerUp={end}
+                onPointerCancel={end}
+              />
+              <em>{sh.start}–{sh.end}</em>
+              <span
+                className="shot-edge right"
+                onPointerDown={(e) => begin(e, i, "end")}
+                onPointerMove={move}
+                onPointerUp={end}
+                onPointerCancel={end}
+              />
+            </div>
+          );
+        })}
+        {cam.shots.length === 0 && <p className="empty tiny">No shots — press “✂ shot” in the transport.</p>}
+        <button
+          className="add-key shot-add"
+          style={{ left: clamp(frame * ppf + ppf / 2, 0, Math.max(20, useStudio.getState().scene.frames * ppf)) }}
+          title="Add a shot starting here"
+          onClick={(e) => {
+            e.stopPropagation();
+            void onPickKey;
+            a.addShot(cam.id, frame);
+          }}
+        >
+          ✂
+        </button>
+      </div>
+    </div>
+  );
+}

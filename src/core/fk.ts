@@ -8,11 +8,15 @@ export interface RigPose {
   ang: Record<string, number>;
   end: Record<string, Vec>;
   root: Vec;
+  /** Rotation of the whole character at its anchor (scene.rootRot). */
+  body: number;
 }
 
 export function solveFK(scene: Scene, rots: Record<string, number>, frame = 0, root?: Vec): RigPose {
   const idx = indexScene(scene);
   const origin = root ?? rootPosAtFrame(scene, frame);
+  // The character's own rotation is applied at the root joint, so every child inherits it.
+  const body = scene.rootRot ?? 0;
   const pos: Record<string, Vec> = {};
   const ang: Record<string, number> = {};
   const end: Record<string, Vec> = {};
@@ -20,12 +24,12 @@ export function solveFK(scene: Scene, rots: Record<string, number>, frame = 0, r
     const rot = rots[b.id] ?? 0;
     if (!b.parent) {
       pos[b.id] = { x: origin.x, y: origin.y };
-      ang[b.id] = b.rest + rot;
+      ang[b.id] = body + b.rest + rot;
     } else {
       const p = idx.byId.get(b.parent);
       if (!p) {
         pos[b.id] = { ...origin };
-        ang[b.id] = b.rest + rot;
+        ang[b.id] = body + b.rest + rot;
       } else {
         const pa = ang[p.id];
         pos[b.id] = { x: end[p.id].x, y: end[p.id].y };
@@ -34,7 +38,7 @@ export function solveFK(scene: Scene, rots: Record<string, number>, frame = 0, r
     }
     end[b.id] = { x: pos[b.id].x + Math.cos(ang[b.id]) * b.length, y: pos[b.id].y + Math.sin(ang[b.id]) * b.length };
   }
-  return { pos, ang, end, root: origin };
+  return { pos, ang, end, root: origin, body };
 }
 
 /** Local-space point → world point using a bone's solved transform. */

@@ -1,9 +1,23 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useStudio } from "../state/store";
-import { clamp, simplify, type Vec } from "../core/math";
+import { clamp, simplify, wrapPi, type Vec } from "../core/math";
 import { hitTest, type Hit } from "../core/hit";
 import { poleHandle } from "../core/ik";
-import { applyCamera, drawForegroundGuides, drawOverlay, drawParts, drawShadow, paintBackdrop, screenToWorld } from "../core/render";
+import {
+  applyCamera,
+  drawCameraOverlay,
+  drawForegroundGuides,
+  drawObjects,
+  drawOverlay,
+  drawParts,
+  drawShadow,
+  paintBackdrop,
+  screenToWorld,
+  type View,
+} from "../core/render";
+import { cameraView, currentShot, pickActive } from "../core/cameras";
+import { drawLightGlow, drawLightHandles, drawLightWash } from "../core/lights";
+import { objectBox } from "../core/scenery";
 import { indexScene, poseRotations } from "../core/rig";
 import { boneToWorld, solveFK, worldToBone } from "../core/fk";
 import { nearestBoneTo } from "../core/pose-edit";
@@ -16,6 +30,17 @@ type DragState =
   | { kind: "bone"; boneId: string; pivot: Vec; startAng: number; startRot: number }
   | { kind: "root"; boneId: string; offset: Vec }
   | { kind: "shape"; shapeId: string; base: Vec[]; start: Vec; mode: "move" | "rotate" | "scale" }
+  | {
+      kind: "stage";
+      id: string;
+      what: "object" | "light" | "camera";
+      offset: Vec;
+      edit: "move" | "rotate" | "scale";
+      startRot: number;
+      startScale: number;
+      pivot: Vec;
+    }
+  | { kind: "camzoom"; id: string }
   | { kind: "grow"; fromBone: string; from: Vec; to: Vec; moved: boolean }
   | { kind: "resize"; boneId: string; anchor: Vec }
   | { kind: "lasso"; pts: Vec[]; start: Vec }
@@ -42,6 +67,9 @@ export function Stage() {
   const showOnion = useStudio((s) => s.showOnion);
   const playing = useStudio((s) => s.playing);
   const mirrorX = useStudio((s) => s.mirrorX);
+  const showCams = useStudio((s) => s.showCams);
+  const cameraViewOn = useStudio((s) => s.cameraView);
+  const activeCameraId = useStudio((s) => s.scene.activeCamera);
   const busy = useStudio((s) => s.busy);
   const a = useStudio.getState();
 
@@ -54,7 +82,7 @@ export function Stage() {
   const [, force] = useState(0);
   const redraw = useCallback(() => force((n) => n + 1), []);
 
-  const st = { scene, frame, live, mode, view, hover, drag, selection, chainPick, drawPoints, showGrid, showBones, showHandles, showNames, showShadow, showOnion, playing, mirrorX };
+  const st = { scene, frame, live, mode, view, hover, drag, selection, chainPick, drawPoints, showGrid, showBones, showHandles, showNames, showShadow, showOnion, playing, mirrorX, showCams, cameraViewOn, activeCameraId };
 
   // ---------------------------------------------------------------- sizing
   useLayoutEffect(() => {
@@ -98,13 +126,23 @@ export function Stage() {
     };
   }, []);
 
+  /**
+   * The view the canvas actually draws through: the free view, or the active camera when camera
+   * view is on. Everything that converts screen↔world (picking, handles, drags) must use it.
+   */
+  const effView = useCallback((): View => {
+    const base: View = { ...view, w: size.w, h: size.h, frame };
+    const cam = cameraViewOn ? pickActive(scene, scene.activeCamera) : null;
+    return cam ? cameraView(scene, base, frame) : base;
+  }, [view, size.w, size.h, scene, cameraViewOn, frame]);
+
   const toWorld = useCallback(
     (cx: number, cy: number): Vec => {
       const r = canvasRef.current?.getBoundingClientRect();
       if (!r) return { x: 0, y: 0 };
-      return screenToWorld({ x: cx - r.left, y: cy - r.top }, { ...view, w: size.w, h: size.h });
+      return screenToWorld({ x: cx - r.left, y: cy - r.top }, effView());
     },
-    [view, size.w, size.h],
+    [effView],
   );
   const toLocal = (cx: number, cy: number): Vec => {
     const r = canvasRef.current?.getBoundingClientRect();
@@ -138,13 +176,17 @@ export function Stage() {
       canvas.width = cw;
       canvas.height = ch;
     }
-    const v = { ...view, w: W, h: H };
+    const v = effView();
     const pose = poseNow();
     const sc = sceneNow();
+    const k = 1 / v.cam.zoom;
 
     paintBackdrop(ctx, scene, W, H);
     applyCamera(ctx, v, dpr);
+    // Lighting first: the wash tints everything painted on top of it, including the backdrop.
+    drawLightWash(ctx, scene, pose, frame, v);
     drawForegroundGuides(ctx, scene, v, { grid: showGrid, ground: true });
+    drawObjects(ctx, scene, frame, "back", { k });
     if (showShadow) drawShadow(ctx, scene, pose);
 
     // onion skin: previous frames pink, next frames cyan
@@ -168,6 +210,14 @@ export function Stage() {
       hover: hover?.startsWith("shape:") ? hover.slice(6) : null,
     });
 
+    // Foreground scenery sits in front of the character, then the lights glow over both.
+    drawObjects(ctx, scene, frame, "front", {
+      k,
+      selected: selection.kind === "object" && selection.id ? [selection.id] : [],
+      hover: hover?.startsWith("object:") ? hover.slice(7) : null,
+    });
+    drawLightGlow(ctx, scene, pose, frame, v);
+
     if (mode !== "art") {
       drawOverlay(ctx, scene, pose, v, {
         showBones,
@@ -182,7 +232,29 @@ export function Stage() {
       });
     }
 
-    const k = 1 / view.cam.zoom;
+    if (showCams) {
+      drawCameraOverlay(ctx, scene, frame, v, cameraViewOn ? scene.activeCamera ?? null : null);
+      drawLightHandles(ctx, scene, pose, v, selection.kind === "light" ? selection.id : null);
+      // scenery anchors: a dot on the anchor plus its ground footprint
+      for (const ob of scene.objects ?? []) {
+        if (!ob.visible) continue;
+        const sel = selection.kind === "object" && selection.id === ob.id;
+        const b = objectBox(ob, scene, frame);
+        ctx.save();
+        ctx.globalAlpha = sel ? 0.9 : 0.35;
+        ctx.strokeStyle = sel ? "#7ef0ff" : "rgba(255,255,255,0.4)";
+        ctx.lineWidth = 1.2 * k;
+        ctx.setLineDash([4 * k, 4 * k]);
+        ctx.strokeRect(b.x, b.y, b.w, b.h);
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.arc(ob.x, ob.y, (sel ? 4.6 : 3.2) * k, 0, Math.PI * 2);
+        ctx.fillStyle = sel ? "#7ef0ff" : "rgba(255,255,255,0.55)";
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
     // rig-mode: chain picking + the bone being grown
     if (mode === "rig") {
       ctx.save();
@@ -260,6 +332,12 @@ export function Stage() {
     handles: mode === "pose" && showHandles,
     parts: mode !== "rig",
     partsFirst: mode === "art" || mode === "draw",
+    // Stage furniture is only grabbable in the set/camera tool (and art mode for props).
+    objects: mode === "camera" || mode === "art",
+    lights: mode === "camera",
+    cameras: mode === "camera",
+    stageFirst: mode === "camera",
+    frame,
   });
 
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -272,7 +350,29 @@ export function Stage() {
     }
     if (e.button !== 0) return;
     const pose = poseNow();
-    const hit = hitTest(scene, pose, { ...view, w: size.w, h: size.h }, world, hitOpts());
+    const hit = hitTest(scene, pose, effView(), world, hitOpts());
+
+    // ------------------------------------------------ stage furniture (any mode)
+    if (hit && (hit.kind === "object" || hit.kind === "light" || hit.kind === "camera")) {
+      const isObj = hit.kind === "object";
+      const target = (scene.objects ?? []).find((o) => o.id === (hit as { id: string }).id);
+      const light = (scene.lights ?? []).find((l) => l.id === (hit as { light: string }).light);
+      const cam = (scene.cameras ?? []).find((c) => c.id === (hit as { cam: string }).cam);
+      const anchor = isObj ? { x: target!.x, y: target!.y } : light ? { x: light.x, y: light.y } : { x: cam!.x, y: cam!.y };
+      a.checkpoint(isObj ? "move scenery" : light ? "move light" : "move camera");
+      a.select(isObj ? "object" : light ? "light" : "camera", isObj ? target!.id : light ? light.id : cam!.id);
+      dragRef.current = {
+        kind: "stage",
+        id: isObj ? target!.id : light ? light.id : cam!.id,
+        what: isObj ? "object" : light ? "light" : "camera",
+        offset: { x: anchor.x - world.x, y: anchor.y - world.y },
+        edit: isObj && e.altKey ? "rotate" : isObj && e.shiftKey ? "scale" : "move",
+        startRot: target?.rot ?? 0,
+        startScale: target?.scale ?? 1,
+        pivot: anchor,
+      };
+      return;
+    }
 
     if (mode === "draw") {
       dragRef.current = { kind: "lasso", pts: [world], start: world };
@@ -324,6 +424,23 @@ export function Stage() {
 
     // pose mode
     if (!hit) {
+      // Camera tool: dragging the empty set moves the shot, which is how you compose a take.
+      const cam = pickActive(scene, scene.activeCamera);
+      if (mode === "camera" && cam) {
+        a.checkpoint("move camera");
+        a.select("camera", cam.id);
+        dragRef.current = {
+          kind: "stage",
+          id: cam.id,
+          what: "camera",
+          offset: { x: cam.x - world.x, y: cam.y - world.y },
+          edit: "move",
+          startRot: 0,
+          startScale: 1,
+          pivot: { x: cam.x, y: cam.y },
+        };
+        return;
+      }
       a.select("none", null);
       return;
     }
@@ -369,6 +486,21 @@ export function Stage() {
         return;
       }
       case "root": {
+        if (e.altKey) {
+          // Alt-drag the hips = turn the whole character (the root bone's own rotation channel).
+          const pivot = pose.pos[hit.bone];
+          a.checkpoint("turn character");
+          a.select("bone", hit.bone);
+          dragRef.current = {
+            kind: "bone",
+            boneId: hit.bone,
+            pivot,
+            startAng: Math.atan2(world.y - pivot.y, world.x - pivot.x),
+            startRot: poseRotations(scene, frame)[hit.bone] ?? 0,
+          };
+          a.setDrag({ kind: "joint", id: hit.bone, point: pivot });
+          return;
+        }
         a.checkpoint("root move");
         a.select("bone", hit.bone);
         dragRef.current = { kind: "root", boneId: hit.bone, offset: { x: pose.pos[hit.bone].x - world.x, y: pose.pos[hit.bone].y - world.y } };
@@ -403,6 +535,33 @@ export function Stage() {
       d.last = local;
       return;
     }
+    if (d.kind === "stage") {
+      const raw = { x: world.x + d.offset.x, y: world.y + d.offset.y };
+      if (d.edit === "rotate") {
+        const obj = (scene.objects ?? []).find((o) => o.id === d.id);
+        if (obj) {
+          const startAng = Math.atan2(-d.offset.y, -d.offset.x);
+          const ang = Math.atan2(world.y - d.pivot.y, world.x - d.pivot.x);
+          let rot = d.startRot + (ang - startAng);
+          if (e.shiftKey) rot = Math.round(rot / SNAP) * SNAP;
+          a.updateObject(obj.id, { rot: wrapPi(rot) });
+        }
+        return;
+      }
+      if (d.edit === "scale") {
+        const obj = (scene.objects ?? []).find((o) => o.id === d.id);
+        if (obj) {
+          const r = Math.hypot(raw.x - obj.x, raw.y - obj.y);
+          const r0 = Math.hypot(d.offset.x, d.offset.y);
+          a.updateObject(obj.id, { scale: clamp((r0 > 4 ? r / r0 : 1) * d.startScale, 0.15, 6) });
+        }
+        return;
+      }
+      const p2 = e.shiftKey ? { x: Math.round(raw.x / 10) * 10, y: Math.round(raw.y / 10) * 10 } : raw;
+      a.stageDrag(d.id, p2);
+      return;
+    }
+    if (d.kind === "camzoom") return;
     if (d.kind === "lasso") {
       d.pts.push(world);
       const s2 = d.pts.length > 6 ? simplify(d.pts, 1.6 / view.cam.zoom) : d.pts;
@@ -512,7 +671,7 @@ export function Stage() {
       redraw();
       return;
     }
-    if (d.kind === "pan") return;
+    if (d.kind === "pan" || d.kind === "camzoom") return;
     a.commitLive();
     a.setDrag(null);
   };
@@ -526,7 +685,14 @@ export function Stage() {
       a.panBy(e.deltaY, 0);
       return;
     }
-    a.zoomAt(Math.exp(-e.deltaY * 0.0016), toLocal(e.clientX, e.clientY));
+    const factor = Math.exp(-e.deltaY * 0.0016);
+    const cam = mode === "camera" ? pickActive(scene, scene.activeCamera) : null;
+    if (cam) {
+      // In the camera tool the wheel is a zoom ring on the shot, not on the view.
+      a.zoomCamera(cam.id, factor);
+      return;
+    }
+    a.zoomAt(factor, toLocal(e.clientX, e.clientY));
   };
 
   const onDrop = (e: React.DragEvent) => {
@@ -606,6 +772,12 @@ function soleLift(scene: Parameters<typeof indexScene>[0], tipBone: string): num
 
 function hoverKey(hit: Hit): string {
   switch (hit.kind) {
+    case "object":
+      return `object:${hit.id}`;
+    case "light":
+      return `light:${hit.light}`;
+    case "camera":
+      return `camera:${hit.cam}`;
     case "ik":
       return `ik:${hit.chain}`;
     case "pole":
@@ -624,7 +796,8 @@ function hoverKey(hit: Hit): string {
 }
 
 function cursorFor(hover: string | null, mode: string): string {
-  if (!hover) return mode === "rig" ? "cell" : mode === "draw" ? "crosshair" : "default";
+  if (!hover) return mode === "rig" ? "cell" : mode === "draw" ? "crosshair" : mode === "camera" ? "move" : "default";
+  if (hover.startsWith("object:") || hover.startsWith("light:") || hover.startsWith("camera:")) return "move";
   if (hover.startsWith("ik:") || hover.startsWith("pole:")) return "grab";
   if (hover.startsWith("joint:") || hover.startsWith("tip:")) return "grab";
   if (hover.startsWith("root:")) return "move";
@@ -640,13 +813,19 @@ function StageHud({ snapped }: { snapped: boolean }) {
   const live = useStudio((s) => s.live);
   const a = useStudio.getState();
   const hint = {
-    pose: "Drag a ring handle = IK pose for the whole limb · drag a joint = rotate one bone · drag the hips = move the character",
+    pose: "Drag a ring handle = IK pose for the whole limb · drag a joint = rotate one bone · drag the hips = move · Alt-drag the hips = turn the character",
     rig: "Drag out from a joint to grow a bone · Shift-click bones to collect them, then “Make IK chain”",
     art: "Drag parts to nudge them · Alt = rotate · Shift = scale · drop new parts from the library on the left",
     draw: "Drag to trace freehand, or click-click-click for a polygon · Enter or double-click welds it to the bone",
+    camera: "Drag anything on the set to place it · wheel zooms the camera · K keys the camera here · drag empty space to move the shot",
   }[mode];
   const bones = useStudio((s) => s.scene.bones.length);
   const parts = PARTS.length;
+  const camId = useStudio((s) => s.scene.activeCamera);
+  const cameraViewOn = useStudio((s) => s.cameraView);
+  const cameras = useStudio((s) => s.scene.cameras);
+  const camera = cameraViewOn ? cameras?.find((c) => c.id === camId) ?? null : null;
+  const shot = camera ? currentShot(camera, frame) : null;
   return (
     <>
       <div className="hud hud-hint">{hint}</div>
@@ -664,12 +843,26 @@ function StageHud({ snapped }: { snapped: boolean }) {
       </div>
       <div className="hud hud-count">
         {bones} bones · {parts} parts to drag
+        {camera && (
+          <button className="mini" style={{ marginLeft: 8 }} onClick={() => a.setActiveCamera(null)} title="Back to the free view">
+            free view
+          </button>
+        )}
+        {!camera && <button className="mini" style={{ marginLeft: 8 }} onClick={() => a.fitAll()} title="Frame character + scenery (Shift+F)">
+          fit set
+        </button>}
       </div>
       <div className="hud hud-frame">
         <b>{frame + 1}</b>
         <span>/{frames}</span>
         {live && Object.keys(live.rot).length > 0 && <em className="chip warn">unkeyed</em>}
         {snapped && <em className="chip ok">planted on ground</em>}
+        {camera && (
+          <em className="chip" title="Framing camera">
+            🎥 {camera.name}
+            {shot ? ` · shot ${shot.start}–${shot.end}` : ""}
+          </em>
+        )}
       </div>
     </>
   );

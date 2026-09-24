@@ -1,4 +1,5 @@
-import { angleLerp, applyEase, clamp, mod, type Ease, type Vec, wrapPi } from "./math";
+import { angleLerp, applyEase, clamp, type Ease, type Vec, wrapPi } from "./math";
+import { findKeySegment, timelineAt, type Timeline } from "./timeline";
 import type { Bone, Keyframe, PosKey, Scene, Track } from "./types";
 
 /* --------------------------------------------------------------- indexing */
@@ -81,53 +82,17 @@ export function ancestorsOf(scene: Scene, id: string): Bone[] {
 
 /* --------------------------------------------------------------- sampling */
 
-function findSegment<T extends { t: number; ease: Ease }>(
-  keys: T[],
-  frame: number,
-  frames: number,
-  loop: boolean,
-): { a: T; b: T; u: number } | null {
-  const n = keys.length;
-  if (!n) return null;
-  if (n === 1) return { a: keys[0], b: keys[0], u: 0 };
-  const span = Math.max(2, frames);
-  const t = loop ? mod(frame, span) : frame;
-  const first = keys[0];
-  const last = keys[n - 1];
-  if (t < first.t) {
-    if (!loop) return { a: first, b: first, u: 0 };
-    const gap = first.t + span - last.t;
-    const u = gap > 0 ? clamp((t + span - last.t) / gap, 0, 1) : 0;
-    return { a: last, b: first, u };
-  }
-  if (t >= last.t) {
-    if (!loop) return { a: last, b: last, u: 0 };
-    const gap = first.t + span - last.t;
-    const u = gap > 0 ? clamp((t - last.t) / gap, 0, 1) : 0;
-    return { a: last, b: first, u };
-  }
-  for (let i = 0; i + 1 < n; i++) {
-    const a = keys[i];
-    const b = keys[i + 1];
-    if (t >= a.t && t < b.t) {
-      const d = b.t - a.t;
-      return { a, b, u: d <= 0 ? 1 : (t - a.t) / d };
-    }
-  }
-  return { a: last, b: last, u: 0 };
-}
-
 /** Rotation value (relative to rest) for a channel of keys at `frame`. */
-export function sampleRotKeys(keys: Keyframe[], frame: number, frames: number, loop: boolean): number | null {
-  const seg = findSegment(keys, frame, frames, loop);
+export function sampleRotKeys(keys: Keyframe[], frame: number, frames: number, loop: boolean, tl?: Timeline): number | null {
+  const seg = findKeySegment(keys, frame, frames, loop, tl);
   if (!seg) return null;
   if (seg.a === seg.b) return seg.a.rot;
   const u = applyEase(seg.a.ease, seg.u);
   return wrapPi(angleLerp(seg.a.rot, seg.b.rot, u));
 }
 
-export function samplePosKeys(keys: PosKey[], frame: number, frames: number, loop: boolean): Vec | null {
-  const seg = findSegment(keys, frame, frames, loop);
+export function samplePosKeys(keys: PosKey[], frame: number, frames: number, loop: boolean, tl?: Timeline): Vec | null {
+  const seg = findKeySegment(keys, frame, frames, loop, tl);
   if (!seg) return null;
   if (seg.a === seg.b) return { x: seg.a.x, y: seg.a.y };
   const u = applyEase(seg.a.ease, seg.u);
@@ -152,14 +117,16 @@ export function poseRotations(
   scene: Scene,
   frame: number,
   overrides?: Record<string, number> | null,
+  cameraId?: string | null,
 ): Record<string, number> {
   const idx = indexScene(scene);
+  const tl = timelineAt(scene, frame, cameraId);
   const out: Record<string, number> = {};
   for (const b of idx.order) {
     let r = 0;
     const tr = scene.tracks[b.id];
     if (tr && tr.rot.length) {
-      const s = sampleRotKeys(tr.rot, frame, scene.frames, scene.loop);
+      const s = sampleRotKeys(tr.rot, frame, scene.frames, scene.loop, tl);
       if (s != null) r = s;
     }
     out[b.id] = r;
@@ -168,12 +135,13 @@ export function poseRotations(
   return out;
 }
 
-export function rootPosAtFrame(scene: Scene, frame: number): Vec {
+export function rootPosAtFrame(scene: Scene, frame: number, cameraId?: string | null): Vec {
+  const tl = timelineAt(scene, frame, cameraId);
   let p: Vec = { ...scene.root };
   for (const b of indexScene(scene).roots) {
     const tr = scene.tracks[b.id];
     if (!tr || !tr.pos.length) continue;
-    const s = samplePosKeys(tr.pos, frame, scene.frames, scene.loop);
+    const s = samplePosKeys(tr.pos, frame, scene.frames, scene.loop, tl);
     if (s) p = { x: scene.root.x + s.x, y: scene.root.y + s.y };
     break;
   }
@@ -246,6 +214,7 @@ export function allKeyFrames(scene: Scene): number[] {
     for (const k of tr.rot) set.add(k.t);
     for ( const k of tr.pos) set.add(k.t);
   }
+  for (const cam of scene.cameras ?? []) for (const k of cam.keys) set.add(k.t);
   return [...set].sort((a, b) => a - b);
 }
 

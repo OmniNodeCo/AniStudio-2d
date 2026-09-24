@@ -17,9 +17,14 @@ const STEPS: { icon: string; title: string; body: string }[] = [
     body: "The dopesheet below has one row per bone. Drag keyframes sideways, press K to key the whole rig, use ease menus, and play with Space. Onion skin shows the frames before/after in pink/cyan.",
   },
   {
+    icon: "🎥",
+    title: "4 · Build the set",
+    body: "Set mode places cameras, lights and scenery. Drop hills, trees and buildings on the ground, add a warm light or a torch that follows a hand, then snap a camera to your view. Cameras own shots — the timeline loops inside the shot you are standing in, and exports can render through the lens.",
+  },
+  {
     icon: "⤒",
-    title: "4 · Export",
-    body: "GIF, PNG sequence, sprite sheet (with TexturePacker json), WebM or the project file itself. Everything you made is plain keyframes, so any tool can read it.",
+    title: "5 · Export",
+    body: "GIF, PNG sequence, sprite sheet (with TexturePacker json), WebM or the project file itself. Pick the framing — tight on the character, cinematic through the camera, or steady for the whole shot. Everything you made is plain keyframes, so any tool can read it.",
   },
 ];
 
@@ -48,14 +53,15 @@ export function HelpModal() {
         <div className="help-keys">
           <b>shortcuts</b>
           {[
-            ["1 / 2 / 3 / 4", "Pose · Rig · Art · Draw"],
+            ["1 / 2 / 3 / 4 / 5", "Pose · Rig · Art · Draw · Set"],
             ["Space", "play / pause"],
             ["← →", "step frame (shift = 5)"],
             ["K", "key the whole rig here"],
             ["A", "toggle auto-key"],
             ["M", "mirror posing"],
+            ["Alt+drag hips", "turn the whole character (keys the root)"],
             ["O", "onion skin count"],
-            ["F", "fit character to view"],
+            ["F / Shift+F", "fit character · fit the whole set"],
             ["B / H / N / G", "bones · handles · names · grid"],
             ["L", "loop"],
             ["Ctrl+Z / Ctrl+Shift+Z", "undo / redo"],
@@ -69,6 +75,14 @@ export function HelpModal() {
           ))}
         </div>
         <div className="help-more">
+          <p>
+            <b>Cameras, lights &amp; scenery:</b> a camera is a take. It frames the stage, owns one or more shots
+            (frame ranges) and can be keyed to push, truck or crane. The active camera&apos;s shot also decides where
+            the timeline loops, so each take is its own little animation. Lights are cheap 2D tricks that still land
+            on your character: a gradient wash tints the backdrop, then an additive glow is painted over the art —
+            and a light can follow an object or a bone, which is how you build a torch. Scenery objects paint either
+            behind (depth &lt; 1) or in front of the character, and every one of them is re-coloured by the palette.
+          </p>
           <p>
             <b>How IK works here:</b> IK is an authoring aid, not a runtime constraint. When you drag a handle the
             studio solves the chain (two-bone analytic maths for arms/legs, FABRIK for tails, spines and three-bone

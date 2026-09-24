@@ -73,7 +73,7 @@ jobs:
         run: |
           npm exec --silent -- esbuild scripts/preview.ts --bundle --platform=node --format=esm \
             --external:@napi-rs/canvas --outfile=.tmp/preview.mjs --log-level=warning
-          node .tmp/preview.mjs kid,robot,dragon,blob 0,6,12 .tmp/preview.png 0 1 300 260
+          node .tmp/preview.mjs kid,cat,ninja,robot,dragon,bird,wizard,blob 0,6,12 .tmp/preview.png 0 1 300 260
 
       - name: Zip the site
         run: |

@@ -3,6 +3,8 @@ import { clamp, emptyBox, growBox, type Vec } from "./math";
 import { shapeWorldPoints, type RigPose } from "./fk";
 import { poleHandle } from "./ik";
 import { indexScene } from "./rig";
+import { cameraCorners, pickActive, sampleCamera } from "./cameras";
+import { buildObject, objectTransform, shade } from "./scenery";
 import type { Scene, ShapePart } from "./types";
 
 export interface Cam {
@@ -14,6 +16,10 @@ export interface View {
   w: number;
   h: number;
   cam: Cam;
+  /** Frame being drawn — flicker and a few animated objects depend on it. */
+  frame?: number;
+  /** Frame at which the current shot started (keeps flicker steady across an export cut). */
+  cut?: number;
 }
 
 export const worldToScreen = (p: Vec, view: View): Vec => ({
@@ -463,6 +469,153 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, scene: Scene, pose: R
   }
   ctx.restore();
 }
+
+/* ------------------------------------------------------------- scenery */
+
+/**
+ * Paint scenery. `band` selects which half to draw: "back" (z < 1, behind the character) or
+ * "front" (z ≥ 1). Objects are drawn in z order, soft-shaded so they read as background.
+ */
+export function drawObjects(
+  ctx: CanvasRenderingContext2D,
+  scene: Scene,
+  frame: number,
+  band: "back" | "front",
+  o: { selected?: string[]; hover?: string | null; outline?: boolean; k?: number } = {},
+) {
+  if (scene.showObjects === false) return;
+  const objects = (scene.objects ?? []).filter((ob) => ob.visible);
+  if (!objects.length) return;
+  const list = objects.filter((ob) => (band === "back" ? ob.z < 1 : ob.z >= 1)).sort((a, b) => a.z - b.z);
+  if (!list.length) return;
+  const outline = o.outline ?? true;
+  const k = o.k ?? 1;
+
+  for (const ob of list) {
+    const parts = buildObject(ob, scene, frame);
+    ctx.save();
+    ctx.globalAlpha = ob.opacity ?? 1;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    for (const part of parts) {
+      const pts = objectTransform(ob, part.pts);
+      if (pts.length < 2) continue;
+      if (part.glow) ctx.globalCompositeOperation = "lighter";
+      else ctx.globalCompositeOperation = "source-over";
+      ctx.globalAlpha = (ob.opacity ?? 1) * (part.opacity ?? 1);
+      tracePoly(ctx, pts, part.closed, !!part.soft);
+      if (part.closed) {
+        ctx.fillStyle = part.fill;
+        ctx.fill();
+      }
+      if (outline && (part.stroke ?? (part.closed ? scene.outline : null))) {
+        ctx.globalAlpha = (ob.opacity ?? 1) * 0.85;
+        ctx.lineWidth = (part.closed ? 2.4 : 2) * k;
+        ctx.strokeStyle = part.stroke ?? scene.outline;
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  // selection marks (drag handles for scenery live in the overlay)
+  const marks = new Set([...(o.selected ?? []), ...(o.hover ? [o.hover] : [])]);
+  if (!marks.size) return;
+  ctx.save();
+  ctx.setLineDash([6 * k, 5 * k]);
+  for (const ob of list) {
+    if (!marks.has(ob.id)) continue;
+    const sel = o.selected?.includes(ob.id);
+    const parts = buildObject(ob, scene, frame);
+    ctx.strokeStyle = sel ? "#7ef0ff" : "rgba(255,255,255,0.5)";
+    ctx.lineWidth = (sel ? 2.2 : 1.4) * k;
+    for (const part of parts) {
+      const pts = objectTransform(ob, part.pts);
+      if (pts.length < 2) continue;
+      tracePoly(ctx, pts, part.closed, !!part.soft);
+      ctx.stroke();
+    }
+    // anchor cross
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(ob.x - 8 * k, ob.y);
+    ctx.lineTo(ob.x + 8 * k, ob.y);
+    ctx.moveTo(ob.x, ob.y - 8 * k);
+    ctx.lineTo(ob.x, ob.y + 8 * k);
+    ctx.stroke();
+    ctx.setLineDash([6 * k, 5 * k]);
+  }
+  ctx.restore();
+}
+
+/* ------------------------------------------------------------- cameras */
+
+/** Other cameras drawn as frustum rectangles, plus the active camera's crosshair. */
+export function drawCameraOverlay(
+  ctx: CanvasRenderingContext2D,
+  scene: Scene,
+  frame: number,
+  view: View,
+  activeId: string | null,
+) {
+  const cams = scene.cameras ?? [];
+  if (!cams.length) return;
+  const k = 1 / view.cam.zoom;
+  ctx.save();
+  ctx.lineCap = "round";
+  for (const cam of cams) {
+    if (!cam.visible) continue;
+    const active = cam.id === activeId;
+    const corners = cameraCorners(scene, cam, frame, view);
+    ctx.setLineDash(active ? [] : [9 * k, 7 * k]);
+    ctx.strokeStyle = active ? "rgba(255,120,170,0.95)" : "rgba(255,120,170,0.42)";
+    ctx.lineWidth = (active ? 2.4 : 1.4) * k;
+    ctx.beginPath();
+    corners.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    ctx.closePath();
+    ctx.stroke();
+    // corner ticks, like a viewfinder
+    const tick = 12 * k;
+    ctx.beginPath();
+    for (const [i, sx, sy] of [
+      [0, 1, 1],
+      [1, -1, 1],
+      [2, -1, -1],
+      [3, 1, -1],
+    ] as const) {
+      const p = corners[i];
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x + sx * tick, p.y);
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x, p.y + sy * tick);
+    }
+    ctx.stroke();
+
+    const s = sampleCamera(cam, frame);
+    ctx.setLineDash([]);
+    ctx.strokeStyle = active ? "rgba(255,120,170,0.9)" : "rgba(255,120,170,0.5)";
+    ctx.lineWidth = 1.4 * k;
+    ctx.beginPath();
+    ctx.moveTo(s.x - 9 * k, s.y);
+    ctx.lineTo(s.x + 9 * k, s.y);
+    ctx.moveTo(s.x, s.y - 9 * k);
+    ctx.lineTo(s.x, s.y + 9 * k);
+    ctx.stroke();
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = active ? "#ffd7e6" : "#e6b3c6";
+    ctx.font = `${Math.max(9, 11 * k)}px ui-sans-serif, system-ui, sans-serif`;
+    ctx.fillText(active ? `● ${cam.name}` : cam.name, s.x + 12 * k, s.y - 10 * k);
+  }
+  ctx.restore();
+}
+
+/** Short helper used by the HUD: the active camera's name, if any. */
+export function activeCameraName(scene: Scene): string | null {
+  return pickActive(scene, scene.activeCamera)?.name ?? null;
+}
+
+/** Slightly darkened variant of a palette colour, for scenery behind the character. */
+export const backdropShade = (hex: string) => shade(hex, -0.18);
 
 /* ------------------------------------------------------ rest pose cache */
 

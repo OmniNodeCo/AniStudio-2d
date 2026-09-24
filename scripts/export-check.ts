@@ -31,13 +31,16 @@ async function main() {
     "../src/io/export"
   );
 
+  const { applyScenerySet, applyCameraDemo } = await import("../src/presets/demos");
+  const { cameraExportBox } = await import("../src/core/shots");
+
   let failures = 0;
   const check = (name: string, ok: boolean, extra = "") => {
     console.log(`${ok ? "ok  " : "FAIL"} ${name} ${extra}`);
     if (!ok) failures++;
   };
 
-  for (const id of ["kid", "robot", "dragon", "blob"]) {
+  for (const id of ["kid", "robot", "dragon", "blob", "cat", "ninja", "bird", "wizard"]) {
     const def = RIG_MAP.get(id)!;
     const scene = buildScene(def);
     if (def.demo) applyDemo(scene, def.demo);
@@ -67,14 +70,46 @@ async function main() {
     check(`${id} still`, stillBytes.length > 1500, `${stillBytes.length}b`);
     writeFileSync(`.tmp/out-${id}.png`, stillBytes);
 
+    // ------------------------------------------------ set + camera exports
+    applyScenerySet(scene);
+    const cams = applyCameraDemo(scene);
+    check(`${id} set+frames build`, cams === 2 && (scene.objects?.length ?? 0) > 8 && (scene.lights?.length ?? 0) >= 2,
+      `${scene.objects?.length} objects, ${scene.lights?.length} lights`);
+
+    const camOpts = { scale: 0.4, transparent: false, overlay: false, from: 0, to, framing: "shot" as const, camId: scene.activeCamera ?? null, aspect: 16 / 9 };
+    const camGif = Buffer.from(await (await exportGif(scene, camOpts)).arrayBuffer());
+    check(`${id} gif through the camera`, camGif.length > 2000 && camGif.subarray(0, 3).toString() === "GIF", `${camGif.length}b`);
+
+    const camZip = Buffer.from(await (await exportPngZip(scene, camOpts)).arrayBuffer());
+    check(`${id} png zip through the camera`, camZip.length > 2000 && camZip.subarray(0, 2).toString() === "PK", `${camZip.length}b`);
+
+    const camSheet = await exportSpriteSheet(scene, { ...camOpts, framing: "camera" }, 4);
+    const camSheetBytes = Buffer.from(await camSheet.png.arrayBuffer());
+    check(`${id} sprite sheet rendered through the camera`, camSheetBytes.length > 1000, `${camSheet.cols}x${camSheet.rows} @${camSheet.cw}x${camSheet.ch}`);
+
+    const camStill = Buffer.from(await (await exportPng(scene, camOpts, Math.floor(scene.frames / 2))).arrayBuffer());
+    check(`${id} still through the camera`, camStill.length > 1500, `${camStill.length}b`);
+
+    const cineBox = cameraExportBox(scene, 0, to, 1280, 720, "camera", scene.activeCamera);
+    const steadyBox = cameraExportBox(scene, 0, to, 1280, 720, "shot", scene.activeCamera);
+    check(
+      `${id} cinematic framing is wider than a single frame`,
+      cineBox.w > 0 && steadyBox.w > 0 && steadyBox.w >= cineBox.w * 0.98,
+      `camera ${Math.round(cineBox.w)}u, shot ${Math.round(steadyBox.w)}u`,
+    );
+    if (id === "cat") writeFileSync(".tmp/out-cat-camera.png", camStill);
+
     const text = await (await projectBlob(scene)).text();
     const back = parseProject(text);
     check(
       `${id} project round-trip`,
       back.scene.bones.length === scene.bones.length &&
         back.scene.shapes.length === scene.shapes.length &&
-        Object.keys(back.scene.tracks).length === Object.keys(scene.tracks).length,
-      `${back.scene.bones.length} bones / ${back.scene.shapes.length} parts`,
+        Object.keys(back.scene.tracks).length === Object.keys(scene.tracks).length &&
+        (back.scene.objects?.length ?? 0) === (scene.objects?.length ?? 0) &&
+        (back.scene.lights?.length ?? 0) === (scene.lights?.length ?? 0) &&
+        (back.scene.cameras?.length ?? 0) === (scene.cameras?.length ?? 0),
+      `${back.scene.bones.length} bones / ${back.scene.shapes.length} parts / ${back.scene.objects?.length ?? 0} objects / ${back.scene.cameras?.length ?? 0} cameras`,
     );
   }
 

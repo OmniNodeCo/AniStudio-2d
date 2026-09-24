@@ -1,29 +1,33 @@
 import { useMemo, useState } from "react";
 import { useStudio } from "../state/store";
 import { PARTS, PART_GROUPS, buildPart } from "../core/parts";
-import { clamp, deg, rad, wrapPi } from "../core/math";
+import { clamp, deg, EASES, rad, wrapPi, type Ease, type Vec } from "../core/math";
 import { indexScene } from "../core/rig";
 import { RIGS } from "../presets/rigs";
 import { DEMOS, DEMO_LABELS } from "../presets/demos";
-import { ROLES, type RoleKey } from "../core/types";
+import { LIGHTS, SCENERY, SCENERY_GROUPS, objectBox } from "../core/scenery";
+import { ROLES, type LightKind, type RoleKey, type Scene, type SceneObject, type SceneryKind } from "../core/types";
+import { sampleCamera } from "../core/cameras";
+import { timelineAt } from "../core/timeline";
 import { ExportPanel } from "./ExportPanel";
 
 /* ------------------------------------------------------------- left dock */
 
 export function LeftDock() {
-  const [tab, setTab] = useState<"parts" | "rig" | "scene">("parts");
+  const [tab, setTab] = useState<"parts" | "rig" | "set" | "scene">("parts");
   return (
     <aside className="dock left">
       <nav className="tabs">
-        {(["parts", "rig", "scene"] as const).map((t) => (
+        {(["parts", "rig", "set", "scene"] as const).map((t) => (
           <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>
-            {t === "parts" ? "Parts" : t === "rig" ? "Rig & IK" : "Scene"}
+            {t === "parts" ? "Parts" : t === "rig" ? "Rig & IK" : t === "set" ? "Set" : "Scene"}
           </button>
         ))}
       </nav>
       <div className="dock-body">
         {tab === "parts" && <PartsLibrary />}
         {tab === "rig" && <RigPanel />}
+        {tab === "set" && <StagePanel />}
         {tab === "scene" && <ScenePanel />}
       </div>
     </aside>
@@ -228,6 +232,15 @@ function ScenePanel() {
           </button>
         ))}
       </div>
+      <h4 className="sec">Build the set</h4>
+      <div className="demo-grid">
+        <button className="ghost" onClick={() => a.addExampleScenery()} title="Hills, foliage, horizon and a key light that matches your sky">
+          🏞 add example scenery
+        </button>
+        <button className="ghost" onClick={() => a.addExampleCameras()} title="An establishing wide and a close-up with a push-in — real shots you can re-time">
+          🎥 add example cameras
+        </button>
+      </div>
       <h4 className="sec">Generate a starting animation (baked IK + keys)</h4>
       <div className="demo-grid">
         {Object.keys(DEMOS).map((d) => (
@@ -304,7 +317,19 @@ export function RightDock() {
   return (
     <aside className="dock right">
       <div className="dock-body">
-        {selection.kind === "shape" ? <ShapeInspector /> : selection.kind === "chain" ? <ChainInspector /> : <BoneInspector />}
+        {selection.kind === "shape" ? (
+          <ShapeInspector />
+        ) : selection.kind === "chain" ? (
+          <ChainInspector />
+        ) : selection.kind === "object" ? (
+          <ObjectInspector />
+        ) : selection.kind === "light" ? (
+          <LightInspector />
+        ) : selection.kind === "camera" ? (
+          <CameraInspector />
+        ) : (
+          <BoneInspector />
+        )}
         <LayersPanel />
         <PoseLibrary />
       </div>
@@ -419,6 +444,50 @@ function BoneInspector() {
         />
       </label>
       <p className="tip">Limits stop IK from snapping elbows and knees the wrong way when you drag a handle past the joint.</p>
+
+      <h4 className="sec">Whole character</h4>
+      <div className="grid2">
+        <label className="field">
+          anchor x
+          <input type="number" value={Math.round(scene.root.x)} onChange={(e) => a.setRigRoot({ x: Number(e.target.value) })} />
+        </label>
+        <label className="field">
+          anchor y
+          <input type="number" value={Math.round(scene.root.y)} onChange={(e) => a.setRigRoot({ y: Number(e.target.value) })} />
+        </label>
+      </div>
+      <label className="slider">
+        <span>
+          facing <b>{Math.round(deg(scene.rootRot ?? 0))}°</b>
+        </span>
+        <input
+          type="range"
+          min={-180}
+          max={180}
+          step={1}
+          value={Math.round(deg(scene.rootRot ?? 0))}
+          onChange={(e) => a.setRigRoot({ rot: rad(Number(e.target.value)) })}
+        />
+      </label>
+      <div className="row-btns wrap">
+        <button className="ghost" onClick={() => a.setRigRoot({ rot: wrapPi((scene.rootRot ?? 0) + Math.PI) })} title="Face the other way">
+          ⇄ turn 180°
+        </button>
+        <button className="ghost" onClick={() => a.setRigRoot({ rot: 0 })}>
+          upright
+        </button>
+        <button className="ghost" onClick={() => a.rotateRigBy(rad(-10))} title="Animated turn — writes a key on the root bone at this frame">
+          ↺ turn (keyed)
+        </button>
+        <button className="ghost" onClick={() => a.rotateRigBy(rad(10))}>
+          ↻ turn (keyed)
+        </button>
+      </div>
+      <p className="tip">
+        The anchor is where the character stands. <b>Facing</b> is a rest rotation for the whole rig;
+        the keyed buttons write a rotation key on the root bone, so you can animate turns. Alt-dragging
+        the hips on the canvas does the same thing.
+      </p>
 
       <h4 className="sec">Mirror pair</h4>
       <select
@@ -707,4 +776,516 @@ function depthOf(idx: ReturnType<typeof indexScene>, id: string): number {
     b = idx.byId.get(b.parent);
   }
   return n;
+}
+
+/* --------------------------------------------------------------- set panel */
+
+/**
+ * The Set tab: what the character is standing in, what lights it and who is filming it.
+ * Click an item to drop it on the ground under the current view, then drag it on the canvas.
+ */
+function StagePanel() {
+  const scene = useStudio((s) => s.scene);
+  const view = useStudio((s) => s.view);
+  const frame = useStudio((s) => s.frame);
+  const selection = useStudio((s) => s.selection);
+  const cameraViewOn = useStudio((s) => s.cameraView);
+  const a = useStudio.getState();
+  const [sceneryFilter, setSceneryFilter] = useState("");
+  const [lightFilter, setLightFilter] = useState("");
+  const objects = scene.objects ?? [];
+  const lights = scene.lights ?? [];
+  const cameras = scene.cameras ?? [];
+  const groundY = scene.ground ?? view.cam.y + 40;
+  const place: Vec = { x: Math.round(view.cam.x), y: Math.round(groundY) };
+
+  const groups = useMemo(
+    () =>
+      SCENERY_GROUPS.map((g) => ({
+        label: g.label,
+        items: SCENERY.filter((s) => s.group === g.id).filter((s) => s.label.toLowerCase().includes(sceneryFilter.toLowerCase())),
+      })).filter((g) => g.items.length),
+    [sceneryFilter],
+  );
+  const lightKinds = LIGHTS.filter((l) => l.label.toLowerCase().includes(lightFilter.toLowerCase()));
+
+  return (
+    <div className="pane">
+      <h4 className="sec">Cameras</h4>
+      <div className="row-btns wrap">
+        <button className="ghost" onClick={() => a.addCamera()} title="Snap a camera to what you are looking at right now">
+          ＋ add camera (this view)
+        </button>
+      </div>
+      {cameras.length > 0 && (
+        <div className="cam-list">
+          {cameras.map((c) => (
+            <div key={c.id} className={`cam-row ${selection.id === c.id ? "sel" : ""}`}>
+              <button
+                className={`cam-dot ${scene.activeCamera === c.id ? "on" : ""}`}
+                title={scene.activeCamera === c.id ? "Framing the stage — click to stop looking through it" : "Look through this camera"}
+                onClick={() => a.setActiveCamera(scene.activeCamera === c.id ? null : c.id)}
+              >
+                🎥
+              </button>
+              <button className="bname" onClick={() => a.select("camera", c.id)}>
+                {c.name}
+                <em>
+                  {c.shots.length ? `${c.shots.length} shot${c.shots.length === 1 ? "" : "s"}` : "no shots"} · {c.keys.length} keys
+                </em>
+              </button>
+              <button className="mini" title="Key the camera at the playhead" onClick={() => a.keyCamera(c.id, frame)}>
+                🔑
+              </button>
+              <button className="mini danger" title="Delete camera" onClick={() => a.deleteCamera(c.id)}>
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="row-btns wrap">
+        <button className="ghost" onClick={() => a.addShot()} title="New shot from the playhead; the timeline then loops inside the shot">
+          ✂ new shot here
+        </button>
+        <button className="ghost" onClick={() => a.frameCameraOnContent()} title="Fit the camera around everything that moves in this shot">
+          ⤢ frame on the action
+        </button>
+      </div>
+      <label className="check">
+        <input type="checkbox" checked={cameraViewOn} onChange={() => a.toggleFlag("cameraView")} />
+        look through the active camera
+      </label>
+      <label className="check">
+        <input type="checkbox" checked={scene.showObjects !== false} onChange={(e) => a.setSceneFlag("showObjects", e.target.checked)} />
+        draw scenery
+      </label>
+      <label className="check">
+        <input type="checkbox" checked={scene.showLights !== false} onChange={(e) => a.setSceneFlag("showLights", e.target.checked)} />
+        draw lights &amp; glows
+      </label>
+      <p className="tip">
+        A camera is a shot: it frames the stage, and the timeline loops <b>inside</b> its current shot.
+        Animated cameras (with keys) get a dopesheet row below — press <b>K</b> with a camera selected.
+      </p>
+
+      <h4 className="sec">Scenery — click to place</h4>
+      <input className="search" placeholder="filter scenery…" value={sceneryFilter} onChange={(e) => setSceneryFilter(e.target.value)} />
+      {groups.map((g) => (
+        <div className="part-group" key={g.label}>
+          <h4>{g.label}</h4>
+          <div className="part-grid">
+            {g.items.map((s) => (
+              <button key={s.id} className="part-tile" title={`${s.label} — add it at ground level`} onClick={() => a.addObject(s.id as SceneryKind, place)}>
+                <SceneryThumb kind={s.id as SceneryKind} scene={scene} seed={3} />
+                <span>{s.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+      <div className="row-btns wrap">
+        <button className="ghost" onClick={() => a.scatterObjects("pine", 7)} title="A quick forest along the ground">
+          🌲 scatter pines
+        </button>
+        <button className="ghost" onClick={() => a.scatterObjects("bush", 9)}>
+          🌿 scatter bushes
+        </button>
+      </div>
+
+      {objects.length > 0 && (
+        <>
+          <h4 className="sec">Placed ({objects.length})</h4>
+          <div className="layers">
+            {[...objects]
+              .sort((x, y) => y.z - x.z)
+              .map((o) => (
+                <div key={o.id} className={`layer ${selection.id === o.id ? "sel" : ""}`}>
+                  <button className="swatch" style={{ background: o.color ?? scene.palette[o.role ?? "cloth"] }} onClick={() => a.select("object", o.id)} />
+                  <button className="bname" onClick={() => a.select("object", o.id)}>
+                    {o.name}
+                    <em>{o.z >= 1 ? "front" : "background"}</em>
+                  </button>
+                  <label className="mini-check" title="Visible">
+                    <input type="checkbox" checked={o.visible} onChange={() => a.updateObject(o.id, { visible: !o.visible })} />
+                  </label>
+                  <button className="mini" title="Bring forward" onClick={() => a.reorderObject(o.id, 1)}>
+                    ▲
+                  </button>
+                  <button className="mini" title="Send back" onClick={() => a.reorderObject(o.id, -1)}>
+                    ▼
+                  </button>
+                  <button className="mini danger" title="Delete" onClick={() => a.deleteObject(o.id)}>
+                    ✕
+                  </button>
+                </div>
+              ))}
+          </div>
+        </>
+      )}
+
+      <h4 className="sec">Lights — click to add</h4>
+      <input className="search" placeholder="filter lights…" value={lightFilter} onChange={(e) => setLightFilter(e.target.value)} />
+      <div className="part-grid">
+        {lightKinds.map((l) => (
+          <button
+            key={l.id}
+            className="part-tile"
+            title={`${l.label} — ${l.hint}`}
+            onClick={() => a.addLight(l.id as LightKind, { x: Math.round(view.cam.x), y: Math.round(groundY - 70) })}
+          >
+            <span className="light-dot" style={{ background: l.color, boxShadow: `0 0 12px ${l.color}` }} />
+            <span>{l.label}</span>
+          </button>
+        ))}
+      </div>
+      {lights.length > 0 && (
+        <div className="cam-list">
+          {lights.map((l) => (
+            <div key={l.id} className={`cam-row ${selection.id === l.id ? "sel" : ""}`}>
+              <button className="swatch" style={{ background: l.color }} onClick={() => a.select("light", l.id)} title="Select light" />
+              <button className="bname" onClick={() => a.select("light", l.id)}>
+                {l.name}
+                <em>
+                  {l.follow ? "follows an object" : `${Math.round(l.radius)}u reach`} · {Math.round(l.intensity * 100)}%
+                </em>
+              </button>
+              <label className="mini-check" title="Visible">
+                <input type="checkbox" checked={l.visible} onChange={() => a.updateLight(l.id, { visible: !l.visible })} />
+              </label>
+              <button className="mini danger" title="Delete light" onClick={() => a.deleteLight(l.id)}>
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="tip">
+        Lights are drawn twice: a <b>wash</b> tints the whole backdrop, then an additive <b>glow</b> is
+        painted over your character — so a torch really does light the person standing next to it.
+        Fires flicker; everything else stays put, which keeps exports stable.
+      </p>
+    </div>
+  );
+}
+
+/** Tiny colour swatch that shows a scenery object's default look. */
+function SceneryThumb({ kind, scene, seed }: { kind: SceneryKind; scene: Scene; seed: number }) {
+  const pts = useMemo(() => {
+    const probe: SceneObject = { id: `thumb-${kind}`, name: kind, kind, x: 0, y: 0, scale: 1, rot: 0, z: 2, visible: true, seed };
+    return objectBox(probe, scene, 0);
+  }, [kind, scene, seed]);
+  const color = scene.palette[(SCENERY.find((s) => s.id === kind)?.role ?? "cloth") as RoleKey] ?? "#9aa4c0";
+  const w = Math.max(1, pts.w);
+  const h = Math.max(1, pts.h);
+  return (
+    <span className="scenery-thumb" title={kind}>
+      <i style={{ background: color, height: `${clamp(6 + (h / 200) * 34, 6, 38)}px`, width: `${clamp(6 + (w / 240) * 34, 6, 36)}px`, borderRadius: h < 60 ? "50%" : "3px" }} />
+    </span>
+  );
+}
+
+/* ------------------------------------------------------------- inspectors */
+
+function ObjectInspector() {
+  const scene = useStudio((s) => s.scene);
+  const selection = useStudio((s) => s.selection);
+  const a = useStudio.getState();
+  const obj = (scene.objects ?? []).find((o) => o.id === selection.id);
+  if (!obj) return null;
+  return (
+    <div className="pane">
+      <h4 className="sec">Scenery — {obj.kind}</h4>
+      <input className="name-input" value={obj.name} onChange={(e) => a.updateObject(obj.id, { name: e.target.value })} />
+      <div className="grid2">
+        <label className="field">
+          x
+          <input type="number" value={Math.round(obj.x)} onChange={(e) => a.updateObject(obj.id, { x: Number(e.target.value) })} />
+        </label>
+        <label className="field">
+          y
+          <input type="number" value={Math.round(obj.y)} onChange={(e) => a.updateObject(obj.id, { y: Number(e.target.value) })} />
+        </label>
+      </div>
+      <label className="slider">
+        <span>scale {obj.scale.toFixed(2)}×</span>
+        <input type="range" min={0.2} max={4} step={0.05} value={obj.scale} onChange={(e) => a.updateObject(obj.id, { scale: Number(e.target.value) })} />
+      </label>
+      <label className="slider">
+        <span>rotation {Math.round(deg(obj.rot))}°</span>
+        <input type="range" min={-180} max={180} step={1} value={Math.round(deg(obj.rot))} onChange={(e) => a.updateObject(obj.id, { rot: rad(Number(e.target.value)) })} />
+      </label>
+      <label className="slider">
+        <span>depth {obj.z.toFixed(2)} ({obj.z >= 1 ? "in front" : "behind"} the character)</span>
+        <input type="range" min={0} max={3} step={0.05} value={obj.z} onChange={(e) => a.updateObject(obj.id, { z: Number(e.target.value) })} />
+      </label>
+      <label className="slider">
+        <span>opacity {Math.round((obj.opacity ?? 1) * 100)}%</span>
+        <input type="range" min={0.1} max={1} step={0.05} value={obj.opacity ?? 1} onChange={(e) => a.updateObject(obj.id, { opacity: Number(e.target.value) })} />
+      </label>
+      <label className="slider">
+        <span>variation {obj.seed ?? 1}</span>
+        <input type="range" min={1} max={40} step={1} value={obj.seed ?? 1} onChange={(e) => a.updateObject(obj.id, { seed: Number(e.target.value) })} />
+      </label>
+      <h4 className="sec">Colours</h4>
+      <label className="field">
+        palette role
+        <select value={obj.role ?? ""} onChange={(e) => a.updateObject(obj.id, { role: (e.target.value || undefined) as RoleKey | undefined })}>
+          <option value="">— from the catalog —</option>
+          {ROLES.map((r) => (
+            <option key={r} value={r}>
+              {r}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="grid2">
+        <label className="field">
+          main
+          <input type="color" value={obj.color ?? scene.palette[obj.role ?? "cloth"]} onChange={(e) => a.updateObject(obj.id, { color: e.target.value })} />
+        </label>
+        <label className="field">
+          secondary
+          <input type="color" value={obj.color2 ?? "#334155"} onChange={(e) => a.updateObject(obj.id, { color2: e.target.value })} />
+        </label>
+      </div>
+      <div className="row-btns wrap">
+        <button className="ghost" onClick={() => a.reorderObject(obj.id, "front")}>
+          to front
+        </button>
+        <button className="ghost" onClick={() => a.reorderObject(obj.id, "back")}>
+          to background
+        </button>
+        <button className="ghost" onClick={() => a.duplicateObject(obj.id)}>
+          ⧉ duplicate
+        </button>
+        <button className="ghost danger" onClick={() => a.deleteObject(obj.id)}>
+          ✕ delete
+        </button>
+      </div>
+      <p className="tip">Objects below 1.0 paint behind the character, 1.0 and up in front — that is how you build depth cheaply.</p>
+    </div>
+  );
+}
+
+function LightInspector() {
+  const scene = useStudio((s) => s.scene);
+  const selection = useStudio((s) => s.selection);
+  const a = useStudio.getState();
+  const light = (scene.lights ?? []).find((l) => l.id === selection.id);
+  if (!light) return null;
+  const def = LIGHTS.find((l) => l.id === light.kind);
+  return (
+    <div className="pane">
+      <h4 className="sec">Light — {def?.label ?? light.kind}</h4>
+      <input className="name-input" value={light.name} onChange={(e) => a.updateLight(light.id, { name: e.target.value })} />
+      <div className="grid2">
+        <label className="field">
+          x
+          <input type="number" value={Math.round(light.x)} onChange={(e) => a.updateLight(light.id, { x: Number(e.target.value) })} />
+        </label>
+        <label className="field">
+          y
+          <input type="number" value={Math.round(light.y)} onChange={(e) => a.updateLight(light.id, { y: Number(e.target.value) })} />
+        </label>
+      </div>
+      <label className="field">
+        colour
+        <input type="color" value={light.color} onChange={(e) => a.updateLight(light.id, { color: e.target.value })} />
+      </label>
+      <label className="slider">
+        <span>intensity {Math.round(light.intensity * 100)}%</span>
+        <input type="range" min={0} max={2} step={0.05} value={light.intensity} onChange={(e) => a.updateLight(light.id, { intensity: Number(e.target.value) })} />
+      </label>
+      <label className="slider">
+        <span>reach {Math.round(light.radius)}u</span>
+        <input type="range" min={40} max={1200} step={10} value={light.radius} onChange={(e) => a.updateLight(light.id, { radius: Number(e.target.value) })} />
+      </label>
+      <label className="slider">
+        <span>flicker {Math.round((light.flicker ?? 0) * 100)}%</span>
+        <input type="range" min={0} max={0.5} step={0.01} value={light.flicker ?? 0} onChange={(e) => a.updateLight(light.id, { flicker: Number(e.target.value) })} />
+      </label>
+      {light.kind === "spot" && (
+        <>
+          <label className="slider">
+            <span>aim {Math.round(deg(light.angle ?? -70))}°</span>
+            <input type="range" min={-180} max={180} step={1} value={Math.round(deg(light.angle ?? -Math.PI / 2))} onChange={(e) => a.updateLight(light.id, { angle: rad(Number(e.target.value)) })} />
+          </label>
+          <label className="slider">
+            <span>beam {Math.round(deg(light.spread ?? 0.35))}°</span>
+            <input type="range" min={5} max={80} step={1} value={Math.round(deg(light.spread ?? 0.35))} onChange={(e) => a.updateLight(light.id, { spread: rad(Number(e.target.value)) })} />
+          </label>
+        </>
+      )}
+      <label className="field">
+        follows
+        <select value={light.follow ?? ""} onChange={(e) => a.attachLightTo(light.id, e.target.value || null)}>
+          <option value="">— stays where it is —</option>
+          {(scene.objects ?? []).map((o) => (
+            <option key={o.id} value={o.id}>
+              {o.name}
+            </option>
+          ))}
+          {scene.bones.map((b) => (
+            <option key={b.id} value={b.id}>
+              bone: {b.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="check">
+        <input type="checkbox" checked={light.visible} onChange={() => a.updateLight(light.id, { visible: !light.visible })} />
+        shining
+      </label>
+      <div className="row-btns wrap">
+        <button className="ghost" onClick={() => a.updateLight(light.id, { x: scene.root.x, y: (scene.ground ?? scene.root.y) - 60 })}>
+          centre on the stage
+        </button>
+        <button className="ghost danger" onClick={() => a.deleteLight(light.id)}>
+          ✕ delete light
+        </button>
+      </div>
+      <p className="tip">
+        A light that follows an object rides it (use it for torches) — the offset in <b>x/y</b> is
+        measured from the object's anchor.
+      </p>
+    </div>
+  );
+}
+
+function CameraInspector() {
+  const scene = useStudio((s) => s.scene);
+  const frame = useStudio((s) => s.frame);
+  const selection = useStudio((s) => s.selection);
+  const a = useStudio.getState();
+  const cam = (scene.cameras ?? []).find((c) => c.id === selection.id);
+  if (!cam) return null;
+  const tl = timelineAt(scene, frame, cam.id);
+  const sample = sampleCamera(cam, frame, tl);
+  const active = scene.activeCamera === cam.id;
+  const idx = cam.shots.findIndex((s) => frame >= s.start && frame <= s.end);
+  return (
+    <div className="pane">
+      <h4 className="sec">Camera</h4>
+      <input className="name-input" value={cam.name} onChange={(e) => a.updateCamera(cam.id, { name: e.target.value })} />
+      <div className="row-btns">
+        <button className={`ghost ${active ? "on" : ""}`} onClick={() => a.setActiveCamera(active ? null : cam.id)}>
+          {active ? "● framing the stage" : "look through this"}
+        </button>
+      </div>
+      <div className="grid2">
+        <label className="field">
+          x
+          <input type="number" value={Math.round(sample.x)} onChange={(e) => a.updateCamera(cam.id, { x: Number(e.target.value) })} />
+        </label>
+        <label className="field">
+          y
+          <input type="number" value={Math.round(sample.y)} onChange={(e) => a.updateCamera(cam.id, { y: Number(e.target.value) })} />
+        </label>
+      </div>
+      <label className="slider">
+        <span>zoom {sample.zoom.toFixed(2)}× @720px</span>
+        <input
+          type="range"
+          min={0.2}
+          max={6}
+          step={0.02}
+          value={sample.zoom}
+          onChange={(e) => {
+            const zoom = Number(e.target.value);
+            if (cam.keys.length) {
+              const keys = cam.keys.map((k) => (k.t === frame ? { ...k, zoom } : k));
+              const hit = keys.some((k) => k.t === frame);
+              a.updateCamera(cam.id, hit ? { zoom, keys } : { zoom });
+              if (!hit) a.keyCamera(cam.id, frame);
+            } else {
+              a.updateCamera(cam.id, { zoom });
+            }
+          }}
+        />
+      </label>
+      <p className="tip">Zoom is measured at a 720px-tall view, so the framing survives export size changes.</p>
+      <div className="row-btns wrap">
+        <button className="ghost" onClick={() => a.keyCamera(cam.id, frame)}>
+          🔑 key camera here
+        </button>
+        <button className="ghost" onClick={() => a.frameCameraOnContent(cam.id)}>
+          ⤢ frame the action
+        </button>
+        <button className="ghost" onClick={() => a.clearCameraKeys(cam.id)} disabled={!cam.keys.length}>
+          clear moves
+        </button>
+      </div>
+
+      <h4 className="sec">Shots ({cam.shots.length})</h4>
+      <div className="shot-list">
+        {cam.shots.map((sh, i) => (
+          <div key={i} className={`shot-item ${i === idx ? "on" : ""}`}>
+            <span className="shot-name">#{i + 1}</span>
+            <input
+              type="number"
+              className="tiny-num"
+              value={sh.start}
+              min={0}
+              max={scene.frames - 1}
+              onChange={(e) => a.updateShot(cam.id, i, { start: Number(e.target.value) })}
+              title="First frame"
+            />
+            <input
+              type="number"
+              className="tiny-num"
+              value={sh.end}
+              min={0}
+              max={scene.frames - 1}
+              onChange={(e) => a.updateShot(cam.id, i, { end: Number(e.target.value) })}
+              title="Last frame"
+            />
+            <button className="mini" title="Cut to this shot" onClick={() => { a.setActiveCamera(cam.id); a.setFrame(sh.start); }}>
+              ⏱
+            </button>
+            <button className="mini danger" title="Delete shot" onClick={() => a.deleteShot(cam.id, i)}>
+              ✕
+            </button>
+          </div>
+        ))}
+        {!cam.shots.length && <p className="empty">No shots yet — the camera still frames the stage, but the timeline loops the whole scene.</p>}
+      </div>
+      <div className="row-btns wrap">
+        <button className="ghost" onClick={() => a.addShot(cam.id, frame)}>
+          ✂ add shot from frame {frame}
+        </button>
+      </div>
+
+      <h4 className="sec">Camera moves ({cam.keys.length} keys)</h4>
+      <div className="pose-list">
+        {cam.keys.map((k) => (
+          <div key={k.t} className="pose-row">
+            <button className="bname" onClick={() => a.setFrame(k.t)}>
+              frame {k.t} · {k.zoom.toFixed(2)}×
+            </button>
+            <select value={k.ease} onChange={(e) => a.easeCameraKeys(cam.id, [k.t], e.target.value as Ease)} title="Easing into the next key">
+              {EASES.map((ez) => (
+                <option key={ez.id} value={ez.id}>
+                  {ez.label}
+                </option>
+              ))}
+            </select>
+            <button className="mini danger" onClick={() => a.deleteCameraKey(cam.id, k.t)}>
+              ✕
+            </button>
+          </div>
+        ))}
+        {!cam.keys.length && <p className="empty">Locked off. Move to another frame, nudge the camera and press “key camera here” to start a move.</p>}
+      </div>
+      <div className="row-btns wrap">
+        <button className="ghost danger" onClick={() => a.deleteCamera(cam.id)}>
+          ✕ delete camera
+        </button>
+      </div>
+      <p className="tip">
+        Keyed cameras push, truck and crane: each key stores position + zoom, and the ease column is the
+        blend into the next key. Exports through a camera keep the framing stable across the whole shot.
+      </p>
+    </div>
+  );
 }

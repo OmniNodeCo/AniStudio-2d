@@ -7,7 +7,10 @@
 import { buildScene } from "../src/core/rig-build";
 import { RIG_MAP } from "../src/presets/rigs";
 import { applyDemo } from "../src/presets/demos";
-import { indexScene, poseRotations } from "../src/core/rig";
+import { indexScene, poseRotations, setRotKey } from "../src/core/rig";
+import { cameraBox, cameraView, makeCamera, sampleCamera } from "../src/core/cameras";
+import { makeLight, makeObject, objectBox } from "../src/core/scenery";
+import { timelineAt } from "../src/core/timeline";
 import { boneToWorld, shapeWorldPoints, solveFK, worldToBone } from "../src/core/fk";
 import { fitView, screenToWorld, worldToScreen } from "../src/core/render";
 import { hitTest } from "../src/core/hit";
@@ -174,6 +177,71 @@ function main() {
   const a1 = solveFK(blank, poseRotations(blank, 0), 0).ang[root.id] ?? 0;
   ok("blank root bone usable for growing", !!root && Number.isFinite(a1), `root=${root?.name}`);
   void b1;
+
+  // ------------------------------------------------- cameras, shots, lighting
+  {
+    const { scene } = setup("kid");
+    const view = fitView(scene, solveFK(scene, poseRotations(scene, 0), 0), 800, 500);
+    const freeView = cameraView(scene, view, 0);
+    ok("no cameras = the free view is untouched", freeView.cam.zoom === view.cam.zoom && freeView.cam.x === view.cam.x);
+
+    const cam = makeCamera(view.cam.x, view.cam.y, view.cam.zoom * (720 / view.h), "Test cam", [{ start: 4, end: 12 }]);
+    scene.cameras = [cam];
+    scene.activeCamera = cam.id;
+    const camView = cameraView(scene, view, 6);
+    ok("looking through a camera keeps the same framing maths", vnear(camView.cam, view.cam, 0.5), `zoom ${view.cam.zoom.toFixed(2)} → ${camView.cam.zoom.toFixed(2)}`);
+
+    // resolution independence: the same camera covers the same world in any canvas size
+    const boxA = cameraBox(cam, 6, 1280, 720);
+    const boxB = cameraBox(cam, 6, 640, 360);
+    ok("camera framing is resolution independent", near(boxA.w, boxB.w, 0.01) && near(boxA.h, boxB.h, 0.01), `${boxA.w.toFixed(1)} vs ${boxB.w.toFixed(1)}`);
+    ok("camera framing follows the aspect ratio", near((boxA.w / boxA.h) * 1 - 16 / 9, 0, 0.01), `ratio ${(boxA.w / boxA.h).toFixed(3)}`);
+
+    // shots own the sampling window: the timeline loops inside the take
+    scene.frames = 24;
+    scene.loop = true;
+    const boneId = scene.bones[2].id;
+    setRotKey(scene, boneId, 20, 1.1);
+    setRotKey(scene, boneId, 6, -0.45);
+    setRotKey(scene, boneId, 8, 0.6);
+    const span = 12 - 4 + 1;
+    const atSix = poseRotations(scene, 6, undefined, cam.id)[boneId];
+    const atLoop = poseRotations(scene, 6 + span, undefined, cam.id)[boneId];
+    ok("a shot loops inside its own frames", near(atSix, atLoop, 0.02), `frame 6 → ${atSix.toFixed(2)}, next loop → ${atLoop.toFixed(2)}`);
+    const atStart = poseRotations(scene, 4, undefined, cam.id)[boneId];
+    ok("the shot window changes the sampled value", !near(atStart, atLoop, 0.02), `${atStart.toFixed(2)} vs ${atLoop.toFixed(2)}`);
+    const whole = timelineAt(scene, 18, cam.id);
+    ok("the shot window is what the camera says", whole.start === 4 && whole.end === 12, `${whole.start}–${whole.end}`);
+
+    // the stage tools can pick the furniture
+    const pose = solveFK(scene, poseRotations(scene, 6), 6);
+    const light = makeLight("fire", pose.pos[scene.bones[1].id].x + 30, pose.pos[scene.bones[1].id].y - 20);
+    const tree = makeObject("tree", pose.pos[scene.bones[1].id].x + 70, pose.pos[scene.bones[1].id].y + 40, 3);
+    scene.lights = [light];
+    scene.objects = [tree];
+    const treeBox = objectBox(tree, scene, 6);
+    const treeMid = { x: treeBox.x + treeBox.w / 2, y: treeBox.y + treeBox.h / 2 };
+    const hitTree = hitTest(scene, pose, view, treeMid, { handles: true, parts: true, partsFirst: false, objects: true, lights: true, cameras: true, stageFirst: true, frame: 6 });
+    ok("scenery is pickable in set mode", hitTree?.kind === "object", hitTree?.kind ?? "nothing");
+    const hitNothing = hitTest(scene, pose, view, treeMid, { handles: true, parts: true, partsFirst: false });
+    ok("scenery never steals clicks in pose mode", hitNothing?.kind !== "object", hitNothing?.kind ?? "nothing");
+    const lightHit = hitTest(scene, pose, view, { x: light.x, y: light.y }, { handles: true, parts: true, partsFirst: false, objects: true, lights: true, cameras: true, stageFirst: true, frame: 6 });
+    ok("lights are pickable in set mode", lightHit?.kind === "light" || lightHit?.kind === "object", lightHit?.kind ?? "nothing");
+    const camSample = sampleCamera(cam, 6, timelineAt(scene, 6, cam.id));
+    const camHit = hitTest(scene, pose, view, { x: camSample.x, y: camSample.y }, { handles: true, parts: true, partsFirst: false, objects: true, lights: true, cameras: true, stageFirst: true, frame: 6 });
+    ok("cameras are pickable in set mode", camHit?.kind === "camera", camHit?.kind ?? "nothing");
+
+    // turning the character rotates its whole skeleton, and IK still lands where it is dragged
+    scene.rootRot = Math.PI / 3;
+    const turned = solveFK(scene, poseRotations(scene, 6), 6);
+    const chain2 = scene.chains[0];
+    const goal = { x: turned.end[chain2.bones[chain2.bones.length - 1]].x + 10, y: turned.end[chain2.bones[chain2.bones.length - 1]].y - 12 };
+    const rots2 = solveTo(scene, turned, chain2, goal, poleFor(scene, turned, chain2));
+    const posed2 = solveFK(scene, { ...poseRotations(scene, 6), ...rots2 }, 6);
+    const reached2 = targetOf(scene, posed2, chain2);
+    ok("IK still works on a turned character", Math.hypot(reached2.x - goal.x, reached2.y - goal.y) <= Math.hypot(turned.end[chain2.bones[chain2.bones.length - 1]].x - goal.x, turned.end[chain2.bones[chain2.bones.length - 1]].y - goal.y) + 0.5);
+    scene.rootRot = 0;
+  }
 
   console.log(fails ? `\n${fails} FAILURES` : "\nall interaction checks passed");
   process.exit(fails ? 1 : 0);

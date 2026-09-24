@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useStudio } from "../state/store";
 import JSZip from "jszip";
 import { clamp } from "../core/math";
 import { download, exportGif, exportPng, exportPngZip, exportSpriteSheet, exportWebm, projectBlob, type ExportOpts } from "../io/export";
-import { canvasBlob } from "../core/shots";
+import { canvasBlob, type Framing } from "../core/shots";
+import { timelineAt } from "../core/timeline";
 
 type Kind = "gif" | "png-seq" | "sheet" | "webm" | "still" | "project";
 
@@ -29,9 +30,23 @@ export function ExportPanel({ compact = false }: { compact?: boolean }) {
   const [to, setTo] = useState(scene.frames - 1);
   const [cols, setCols] = useState(6);
   const [progress, setProgress] = useState<number | null>(null);
+  const [framing, setFraming] = useState<Framing>("fit");
+  const [aspect, setAspect] = useState(16 / 9);
+  const cameras = scene.cameras ?? [];
+  const camId = scene.activeCamera ?? null;
+  const shot = useMemo(() => (camId ? timelineAt(scene, frame, camId) : null), [scene, frame, camId]);
 
   const run = async () => {
-    const opts: ExportOpts = { scale, transparent, overlay, from: clamp(from, 0, scene.frames - 1), to: clamp(to, 0, scene.frames - 1) };
+    const opts: ExportOpts = {
+      scale,
+      transparent,
+      overlay,
+      from: clamp(from, 0, scene.frames - 1),
+      to: clamp(to, 0, scene.frames - 1),
+      framing,
+      camId,
+      aspect,
+    };
     const base = (scene.name || "animation").replace(/[^\w-]+/g, "-").toLowerCase();
     try {
       a.setBusy(null);
@@ -41,7 +56,7 @@ export function ExportPanel({ compact = false }: { compact?: boolean }) {
         return;
       }
       if (kind === "still") {
-        const blob = await exportPng(scene, { ...opts, from: frame, to: frame });
+        const blob = await exportPng(scene, { ...opts, from: frame, to: frame }, frame);
         download(blob, `${base}-frame-${frame}.png`);
         a.notify("Frame exported", "ok");
         return;
@@ -124,6 +139,50 @@ export function ExportPanel({ compact = false }: { compact?: boolean }) {
           </label>
         )}
       </div>
+      {cameras.length > 0 && kind !== "project" && (
+        <>
+          <label className="field">
+            framing
+            <select value={framing} onChange={(e) => setFraming(e.target.value as Framing)} title="How much of the set the export covers">
+              <option value="fit">Tight on the character</option>
+              <option value="camera">Through the camera (cinematic)</option>
+              <option value="shot">Whole shot (steady)</option>
+            </select>
+          </label>
+          {framing !== "fit" && (
+            <label className="field">
+              frame ratio
+              <select value={aspect} onChange={(e) => setAspect(Number(e.target.value))}>
+                <option value={16 / 9}>16:9</option>
+                <option value={4 / 3}>4:3</option>
+                <option value={1}>1:1</option>
+                <option value={9 / 16}>9:16</option>
+              </select>
+            </label>
+          )}
+          <p className="tip">
+            {framing === "fit" && "Cropped to the character — ideal for sprite sheets and quick GIFs."}
+            {framing === "camera" && `Rendered through ${cameras.find((c) => c.id === camId)?.name ?? "the camera"} — pushes and pans are kept.`}
+            {framing === "shot" && "The whole take stays in frame, so nothing pops out while the camera moves."}
+          </p>
+        </>
+      )}
+      {shot && kind !== "project" && (
+        <div className="row-btns">
+          <button
+            className="ghost"
+            onClick={() => {
+              setFrom(shot.start);
+              setTo(shot.end);
+            }}
+          >
+            ↳ use shot {shot.start}–{shot.end}
+          </button>
+          <button className="ghost" onClick={() => { setFrom(0); setTo(scene.frames - 1); }}>
+            full scene
+          </button>
+        </div>
+      )}
       <label className="check">
         <input type="checkbox" checked={transparent} onChange={(e) => setTransparent(e.target.checked)} disabled={kind === "webm" || kind === "project"} />
         transparent background

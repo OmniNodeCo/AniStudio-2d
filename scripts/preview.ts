@@ -2,7 +2,7 @@
  * Offline preview renderer — lets me eyeball rig proportions and the demo animations
  * without a browser. Usage:
  *   npx esbuild scripts/preview.ts --bundle --platform=node --format=esm --outfile=.tmp/preview.mjs
- *   node .tmp/preview.mjs kid,robot,dragon,blob 0,8,16 out.png 1
+ *   node .tmp/preview.mjs kid,cat,ninja,robot,dragon,bird,wizard,blob 0,8,16 out.png 1
  */
 import { createCanvas, type Canvas } from "@napi-rs/canvas";
 import { writeFileSync, mkdirSync } from "node:fs";
@@ -14,7 +14,7 @@ import { RIG_MAP } from "../src/presets/rigs";
 import { applyDemo } from "../src/presets/demos";
 
 const arg = (i: number, def: string) => process.argv[i] ?? def;
-const rigIds = arg(2, "kid,robot,dragon,blob").split(",");
+const rigIds = arg(2, "kid,cat,ninja,robot,dragon,bird,wizard,blob").split(",");
 const frames = arg(3, "0,8,16").split(",").map((n) => Number(n));
 const out = arg(4, "preview.png");
 const withOverlay = arg(5, "1") === "1";

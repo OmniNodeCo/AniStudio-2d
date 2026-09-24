@@ -5,8 +5,11 @@
  */
 import { useStudio } from "../src/state/store";
 import { indexScene, poseRotations } from "../src/core/rig";
-import { solveFK } from "../src/core/fk";
-import { shapeWorldPoints } from "../src/core/fk";
+import { solveFK, shapeWorldPoints } from "../src/core/fk";
+import { cameraBox, sampleCamera } from "../src/core/cameras";
+import { lightAnchor } from "../src/core/lights";
+import { sceneBounds } from "../src/core/render";
+import { timelineAt } from "../src/core/timeline";
 
 let fails = 0;
 const ok = (name: string, cond: boolean, extra = "") => {
@@ -255,6 +258,208 @@ async function main() {
   ok("setBusy", st().busy === "working");
   st().setBusy(null);
   ok("history not polluted by UI state", st().past.every((p) => !!p.scene.bones.length));
+
+  // ------------------------------------------------------- new characters
+  for (const id of ["cat", "ninja", "bird", "wizard"]) {
+    st().loadRig(id, true);
+    const sc = st().scene;
+    const keyed = Object.values(sc.tracks).reduce((n, t) => n + t.rot.length, 0);
+    ok(`loadRig ${id} (rig + demo)`, sc.rigId === id && sc.bones.length > 10 && sc.chains.length >= 3 && sc.shapes.length > 10 && keyed > 10,
+      `${sc.bones.length} bones, ${sc.chains.length} chains, ${sc.shapes.length} parts, ${keyed} keys`);
+    const finiteShapes = sc.shapes.every((sh) => sh.pts.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y)));
+    ok(`${id} art is finite`, finiteShapes);
+    const pose = solveFK(sc, poseRotations(sc, Math.floor(sc.frames / 2)), Math.floor(sc.frames / 2));
+    const moved = Object.keys(pose.pos).filter((b) => Number.isFinite(pose.pos[b].x) && Number.isFinite(pose.pos[b].y));
+    ok(`${id} solves a pose every frame`, moved.length === sc.bones.length, `${moved.length}/${sc.bones.length} joints`);
+  }
+
+  // ------------------------------------------------------- character rotation
+  st().loadRig("cat", false);
+  {
+    const sc0 = st().scene;
+    const pose0 = solveFK(sc0, poseRotations(sc0, 0), 0);
+    const before = { x: pose0.end[sc0.bones[2].id].x, y: pose0.end[sc0.bones[2].id].y };
+    st().setRigRoot({ rot: Math.PI / 2 });
+    const sc1 = st().scene;
+    ok("setRigRoot stores the rotation", Math.abs((sc1.rootRot ?? 0) - Math.PI / 2) < 1e-6);
+    const pose1 = solveFK(sc1, poseRotations(sc1, 0), 0);
+    const after = pose1.end[sc1.bones[2].id];
+    const root = pose1.pos[sc1.bones[0].id];
+    const r0 = Math.hypot(before.x - root.x, before.y - root.y);
+    const r1 = Math.hypot(after.x - root.x, after.y - root.y);
+    ok("turning the rig keeps every bone at its own distance", Math.abs(r0 - r1) < 1.5, `${r0.toFixed(1)} → ${r1.toFixed(1)}`);
+    const a0 = Math.atan2(before.y - root.y, before.x - root.x);
+    const a1 = Math.atan2(after.y - root.y, after.x - root.x);
+    ok("turning the rig rotates the whole skeleton", Math.abs(Math.atan2(Math.sin(a1 - a0 - Math.PI / 2), Math.cos(a1 - a0 - Math.PI / 2))) < 0.05,
+      `${((a1 - a0) * 180 / Math.PI).toFixed(1)}°`);
+    st().setRigRoot({ rot: 0 });
+    st().checkpoint("turn");
+    st().rotateRigBy(0.4);
+    ok("rotateRigBy feeds the live buffer", Math.abs((st().live?.rot?.[st().scene.bones[0].id] ?? 0) - 0.4) < 1e-6);
+    st().commitLive();
+    ok("the turn is keyed on the root bone", keyCount(st().scene.bones[0].id, st().frame) === 1);
+  }
+
+  // ------------------------------------------------------------- scenery
+  st().loadRig("kid", false);
+  {
+    const n0 = st().scene.objects?.length ?? 0;
+    const id = st().addObject("pine", { x: 10, y: 40 });
+    ok("addObject places scenery", (st().scene.objects?.length ?? 0) === n0 + 1);
+    const ob = st().scene.objects!.find((o) => o.id === id)!;
+    ok("placed object sits where it was dropped", ob.x === 10 && ob.y === 40 && ob.scale === 1, `${ob.x},${ob.y}`);
+    st().updateObject(id, { scale: 1.4, rot: 0.3, role: "cloth" });
+    const upd = st().scene.objects!.find((o) => o.id === id)!;
+    ok("updateObject edits props", upd.scale === 1.4 && Math.abs(upd.rot - 0.3) < 1e-6);
+    st().reorderObject(id, "front");
+    ok("reorderObject can lift scenery in front of the character", st().scene.objects!.find((o) => o.id === id)!.z >= 1);
+    st().reorderObject(id, "back");
+    ok("reorderObject can push scenery behind the character", st().scene.objects!.find((o) => o.id === id)!.z < 1);
+    st().stageDrag(id, { x: 99, y: 22 });
+    st().commitLive();
+    ok("dragging scenery commits it", st().scene.objects!.find((o) => o.id === id)!.x === 99);
+    const uni = solveFK(st().scene, poseRotations(st().scene, 0), 0);
+    const shp = sceneBounds(st().scene, uni);
+    ok("scenery grows the scene bounds", Number.isFinite(shp.w) && shp.w > 0, `${Math.round(shp.w)} wide`);
+    st().duplicateObject(id);
+    ok("duplicateObject copies it", (st().scene.objects?.length ?? 0) === n0 + 2);
+    st().deleteObject(id);
+    st().deleteObject(st().scene.objects![st().scene.objects!.length - 1].id);
+    ok("deleteObject clears it", (st().scene.objects?.length ?? 0) === n0);
+    st().scatterObjects("pine", 5);
+    ok("scatterObjects plants several", (st().scene.objects?.length ?? 0) === n0 + 5);
+    ok("scattered objects vary", new Set(st().scene.objects!.map((o) => o.scale)).size > 1);
+    st().deleteObject(st().scene.objects![0].id);
+    st().deleteObject(st().scene.objects![0].id);
+    st().deleteObject(st().scene.objects![0].id);
+    st().deleteObject(st().scene.objects![0].id);
+    st().deleteObject(st().scene.objects![0].id);
+    ok("scenery cleared", (st().scene.objects?.length ?? 0) === n0);
+  }
+
+  // -------------------------------------------------------------- lights
+  {
+    const id = st().addLight("fire", { x: 0, y: 0 });
+    ok("addLight creates a light", (st().scene.lights?.length ?? 0) === 1 && st().selection.kind === "light");
+    st().updateLight(id, { intensity: 1.5, radius: 400, flicker: 0.3 });
+    const l = st().scene.lights![0];
+    ok("updateLight edits it", l.intensity === 1.5 && l.radius === 400 && l.flicker === 0.3);
+    const anchor = lightAnchor(l, st().scene, solveFK(st().scene, poseRotations(st().scene, 0), 0));
+    ok("light anchor resolves", Number.isFinite(anchor.x) && Number.isFinite(anchor.y));
+    st().attachLightTo(id, st().scene.bones[2].id);
+    ok("attachLightTo can ride a bone", st().scene.lights![0].follow === st().scene.bones[2].id);
+    const anchored = lightAnchor(st().scene.lights![0], st().scene, solveFK(st().scene, poseRotations(st().scene, 0), 0));
+    const bonePos = solveFK(st().scene, poseRotations(st().scene, 0), 0).pos[st().scene.bones[2].id];
+    ok("a bone-following light sits on the bone", Math.hypot(anchored.x - bonePos.x, anchored.y - bonePos.y) < 1e-6);
+    st().deleteLight(id);
+    ok("deleteLight removes it", (st().scene.lights?.length ?? 0) === 0);
+    st().addExampleScenery();
+    ok("example scenery includes objects + lights", (st().scene.objects?.length ?? 0) > 8 && (st().scene.lights?.length ?? 0) >= 2,
+      `${st().scene.objects?.length} objects, ${st().scene.lights?.length} lights`);
+    while ((st().scene.lights?.length ?? 0)) st().deleteLight(st().scene.lights![0].id);
+    while ((st().scene.objects?.length ?? 0)) st().deleteObject(st().scene.objects![0].id);
+  }
+
+  // ------------------------------------------------------------- cameras
+  {
+    ok("no cameras at boot", (st().scene.cameras?.length ?? 0) === 0);
+    const camId = st().addCamera();
+    ok("addCamera frames the stage", st().scene.cameras!.length === 1 && st().scene.activeCamera === camId && st().mode === "camera");
+    const cam0 = st().scene.cameras![0];
+    ok("a new camera already owns one shot", cam0.shots.length === 1 && cam0.shots[0].start === 0);
+    ok("camera zoom is normalised to 720px", cam0.zoom > 0.2 && cam0.zoom < 20, `zoom=${cam0.zoom.toFixed(2)}`);
+
+    // a shot splits the timeline: sampling must clamp inside the current shot
+    st().addShot(camId, 10, 15);
+    const cam1 = st().scene.cameras![0];
+    ok("addShot splits the shot", cam1.shots.length === 2, cam1.shots.map((s2) => `${s2.start}-${s2.end}`).join(", "));
+    ok("the second shot does not overlap the first", cam1.shots[1].start > cam1.shots[0].end);
+    st().setFrame(cam1.shots[1].start);
+    const tl = timelineAt(st().scene, st().frame, camId);
+    ok("the shot owns the timeline window", tl.start === cam1.shots[1].start && tl.end === cam1.shots[1].end, `${tl.start}–${tl.end}`);
+    st().updateShot(camId, 1, { start: st().scene.cameras![0].shots[1].start + 1 });
+    ok("updateShot re-times a take", st().scene.cameras![0].shots[1].start === cam1.shots[1].start + 1);
+    st().deleteShot(camId, 1);
+    ok("deleteShot drops it", st().scene.cameras![0].shots.length === 1);
+
+    // keyed camera moves — put the playhead back inside a shot first
+    st().updateShot(camId, 0, { start: 0, end: st().scene.frames - 1 });
+    st().setFrame(6);
+    const f0 = st().frame;
+    ok("the whole scene is one take again", st().scene.cameras![0].shots.length === 1 && st().scene.cameras![0].shots[0].end === st().scene.frames - 1);
+    st().keyCamera(camId, f0);
+    st().setFrame(f0 + 4);
+    st().zoomCamera(camId, 1.5);
+    st().updateCamera(camId, { x: st().scene.cameras![0].x + 12, y: st().scene.cameras![0].y - 6 });
+    st().keyCamera(camId, f0 + 4);
+    const cam2 = st().scene.cameras![0];
+    ok("keyCamera stores marks", cam2.keys.length >= 2, `${cam2.keys.length} keys`);
+    const early = sampleCamera(cam2, f0, timelineAt(st().scene, f0, camId));
+    const later = sampleCamera(cam2, f0 + 4, timelineAt(st().scene, f0 + 4, camId));
+    ok("a keyed camera moves", Math.abs(later.zoom - early.zoom) > 0.01 && Math.abs(later.x - early.x) > 1,
+      `zoom ${early.zoom.toFixed(2)} → ${later.zoom.toFixed(2)}`);
+    const mid = sampleCamera(cam2, f0 + 2, timelineAt(st().scene, f0 + 2, camId));
+    ok("camera moves interpolate", mid.zoom > Math.min(early.zoom, later.zoom) - 1e-6 && mid.zoom < Math.max(early.zoom, later.zoom) + 1e-6);
+
+    // camera keys are dopesheet citizens: select / move / ease / delete through the store
+    st().setKeySel(`cam:${camId}`, [f0 + 4]);
+    st().moveSelectedKeys(-2);
+    ok("camera keys can be dragged in the dopesheet", st().scene.cameras![0].keys.some((k) => k.t === f0 + 2));
+    st().setKeySel(`cam:${camId}`, [f0 + 2]);
+    st().setEaseOnSelected("bounce");
+    ok("camera keys take easing", st().scene.cameras![0].keys.find((k) => k.t === f0 + 2)!.ease === "bounce");
+    st().setKeySel(`cam:${camId}`, [f0 + 2]);
+    st().deleteSelectedKeys();
+    ok("camera keys can be deleted", !st().scene.cameras![0].keys.some((k) => k.t === f0 + 2));
+    st().easeCameraKeys(camId, st().scene.cameras![0].keys.map((k) => k.t), "linear");
+    ok("easeCameraKeys sets a batch", st().scene.cameras![0].keys.every((k) => k.ease === "linear"));
+
+    // camera body drag writes into the live buffer, then commits — an animated camera gains a move
+    const keysBefore = st().scene.cameras![0].keys.length;
+    const dragFrame = st().frame;
+    st().checkpoint("camera drag");
+    st().stageDrag(camId, { x: 40, y: -20 });
+    ok("dragging a camera fills the live buffer", Object.keys(st().live?.objs ?? {}).length === 1);
+    st().commitLive();
+    ok("the camera drag commits", st().live === null && Math.abs(st().scene.cameras![0].x - 40) < 1e-6);
+    ok(
+      "dragging an animated camera keys the move at this frame",
+      st().scene.cameras![0].keys.length === keysBefore + 1 && st().scene.cameras![0].keys.some((k) => k.t === dragFrame && Math.abs(k.x - 40) < 1e-6),
+      `${keysBefore} → ${st().scene.cameras![0].keys.length} keys`,
+    );
+
+    st().clearCameraKeys(camId);
+    ok("clearCameraKeys locks it off", st().scene.cameras![0].keys.length === 0);
+    st().frameCameraOnContent(camId);
+    const framed = sampleCamera(st().scene.cameras![0], st().frame, timelineAt(st().scene, st().frame, camId));
+    ok("frameCameraOnContent fits the character", framed.zoom > 0.1 && Number.isFinite(framed.x) && Number.isFinite(framed.y), `zoom=${framed.zoom.toFixed(2)}`);
+    {
+      // the fitted lens must actually contain the whole character during the take
+      const camNow = st().scene.cameras!.find((c) => c.id === camId)!;
+      const win = timelineAt(st().scene, st().frame, camId);
+      let inside = true;
+      for (let f = win.start; f <= win.end; f += 2) {
+        const b = cameraBox(camNow, f, 1280, 720, win);
+        const pose = solveFK(st().scene, poseRotations(st().scene, f, undefined, camId), f);
+        for (const bone of st().scene.bones) {
+          for (const p2 of [pose.pos[bone.id], pose.end[bone.id]]) {
+            if (!p2) continue;
+            if (p2.x < b.x - 1 || p2.x > b.x + b.w + 1 || p2.y < b.y - 1 || p2.y > b.y + b.h + 1) inside = false;
+          }
+        }
+      }
+      ok("the framed camera keeps the character in shot", inside, "joints inside the lens rect for the whole take");
+    }
+    st().fitAll();
+    ok("fitAll keeps the camera finite", Number.isFinite(st().view.cam.zoom) && st().view.cam.zoom > 0.02, `zoom=${st().view.cam.zoom.toFixed(2)}`);
+    st().addExampleCameras();
+    ok("example cameras come with shots", (st().scene.cameras?.length ?? 0) >= 3 && st().scene.activeCamera != null,
+      (st().scene.cameras ?? []).map((c) => c.name).join(", "));
+    st().setActiveCamera(null);
+    ok("free view clears the framing camera", st().scene.activeCamera === null);
+    while ((st().scene.cameras?.length ?? 0)) st().deleteCamera(st().scene.cameras![0].id);
+    ok("deleting every camera falls back to free view", (st().scene.cameras?.length ?? 0) === 0);
+  }
 
   console.log(fails ? `\n${fails} FAILURES` : "\nall store checks passed");
   process.exit(fails ? 1 : 0);

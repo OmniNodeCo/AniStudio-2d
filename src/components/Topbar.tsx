@@ -9,6 +9,7 @@ const MODES: { id: Mode; label: string; icon: string; key: string; blurb: string
   { id: "rig", label: "Rig", icon: "🦴", key: "2", blurb: "Grow bones, build IK chains" },
   { id: "art", label: "Art", icon: "🎨", key: "3", blurb: "Move, recolour, re-layer parts" },
   { id: "draw", label: "Draw", icon: "✎", key: "4", blurb: "Trace your own shapes" },
+  { id: "camera", label: "Set", icon: "🎥", key: "5", blurb: "Place cameras, lights and scenery" },
 ];
 
 export function Topbar() {
@@ -21,6 +22,11 @@ export function Topbar() {
   const showShadow = useStudio((s) => s.showShadow);
   const showOnion = useStudio((s) => s.showOnion);
   const mirrorX = useStudio((s) => s.mirrorX);
+  const cameraViewOn = useStudio((s) => s.cameraView);
+  const cameras = useStudio((s) => s.scene.cameras);
+  const activeCamera = useStudio((s) => s.scene.activeCamera);
+  const showObjects = useStudio((s) => s.scene.showObjects !== false);
+  const showLights = useStudio((s) => s.scene.showLights !== false);
   const past = useStudio((s) => s.past.length);
   const future = useStudio((s) => s.future.length);
   const a = useStudio.getState();
@@ -96,6 +102,30 @@ export function Topbar() {
         <button className={`tg ${mirrorX ? "on" : ""}`} onClick={() => a.toggleFlag("mirrorX")} title="Mirror posing across the rig centre (M)">
           ⇋ mirror
         </button>
+        <label className="tg sel" title="Which camera frames the stage">
+          🎥
+          <select
+            value={activeCamera ?? ""}
+            onChange={(e) => a.setActiveCamera(e.target.value || null)}
+            title="Look through a camera, or build with the free view"
+          >
+            <option value="">free view</option>
+            {(cameras ?? []).map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button className={`tg ${cameraViewOn ? "on" : ""}`} onClick={() => a.toggleFlag("cameraView")} title="Look through the active camera (off = free view, camera still exports)">
+          cam view
+        </button>
+        <button className={`tg ${showObjects ? "on" : ""}`} onClick={() => a.setSceneFlag("showObjects", !showObjects)} title="Show scenery">
+          set
+        </button>
+        <button className={`tg ${showLights ? "on" : ""}`} onClick={() => a.setSceneFlag("showLights", !showLights)} title="Show light wash & glows">
+          lights
+        </button>
         <label className="tg sel" title="Onion skin frames">
           onion
           <select value={showOnion} onChange={(e) => a.setShowOnion(Number(e.target.value))}>
@@ -142,6 +172,9 @@ export function Topbar() {
         </button>
         <button className="ib" onClick={() => a.toggleFlag("showHelp")} title="How this works (?)">
           ?
+        </button>
+        <button className="ib" onClick={() => a.addCamera()} title="Add a camera framing what you see now (Set mode)">
+          🎥+
         </button>
         <input
           ref={fileRef}

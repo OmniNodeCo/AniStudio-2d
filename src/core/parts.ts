@@ -84,6 +84,15 @@ export const PARTS: PartDef[] = [
     build: ({ len }) => poly(0, -m(len, 0.4), len * 0.62, -m(len, 0.46), len * 0.7, m(len, 0.44), 0, m(len, 0.42)),
   },
   {
+    id: "belt",
+    label: "Belt / band",
+    group: "body",
+    role: "cloth2",
+    anchor: "start",
+    sharp: true,
+    build: ({ len }) => poly(0, -m(len, 0.16), len, -m(len, 0.16), len, m(len, 0.16), 0, m(len, 0.16)),
+  },
+  {
     id: "neck",
     label: "Neck",
     group: "body",

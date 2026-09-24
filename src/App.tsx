@@ -167,6 +167,9 @@ export function App() {
         case "4":
           s.setMode("draw");
           break;
+        case "5":
+          s.setMode("camera");
+          break;
         case "k":
           s.keyCurrentPose();
           break;
@@ -193,7 +196,9 @@ export function App() {
           s.setShowOnion((s.showOnion + 1) % 5);
           break;
         case "f":
-          s.fit();
+          if (e.shiftKey && s.mode === "pose") s.fitAll();
+          else if (e.shiftKey) s.fitAll();
+          else s.fit();
           break;
         case "l":
           s.setLoop(!s.scene.loop);
@@ -212,6 +217,9 @@ export function App() {
           e.preventDefault();
           if (s.keySel) s.deleteSelectedKeys();
           else if (s.selection.kind === "shape" && s.selection.id) s.deleteShape(s.selection.id);
+          else if (s.selection.kind === "object" && s.selection.id) s.deleteObject(s.selection.id);
+          else if (s.selection.kind === "light" && s.selection.id) s.deleteLight(s.selection.id);
+          else if (s.selection.kind === "camera" && s.selection.id) s.deleteCamera(s.selection.id);
           else if (s.drawPoints.length) s.setDrawPoints(s.drawPoints.slice(0, -1));
           else s.notify("Select a keyframe or a part first", "info");
           break;

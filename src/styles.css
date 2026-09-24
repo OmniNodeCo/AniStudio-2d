@@ -1390,3 +1390,173 @@ select.ib:hover {
     transform: rotate(1turn);
   }
 }
+
+/* ==========================================================================
+   The set: cameras, lights, scenery and the shot strip on the timeline.
+   ========================================================================== */
+
+.cam-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 210px;
+  overflow: auto;
+}
+.cam-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 4px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+}
+.cam-row:hover {
+  background: #171a25;
+}
+.cam-row.sel {
+  background: rgba(124, 240, 200, 0.1);
+  border-color: rgba(124, 240, 200, 0.3);
+}
+.cam-dot {
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #12141d;
+  font-size: 12px;
+  line-height: 1;
+  filter: grayscale(0.6);
+  opacity: 0.65;
+}
+.cam-dot.on {
+  filter: none;
+  opacity: 1;
+  border-color: rgba(255, 120, 170, 0.65);
+  background: rgba(255, 120, 170, 0.16);
+}
+.light-dot {
+  display: block;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+.scenery-thumb {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+}
+.scenery-thumb i {
+  display: block;
+  border: 1.5px solid rgba(12, 14, 20, 0.85);
+}
+.ghost.on {
+  color: #ffd7e6;
+  border-color: rgba(255, 120, 170, 0.55);
+  background: rgba(255, 120, 170, 0.14);
+}
+.empty.tiny {
+  padding: 4px 8px;
+  font-size: 10.5px;
+}
+
+/* --------------------------------------------------------- shot strip */
+.shot-row {
+  height: 22px;
+  background: #0f1219;
+  border-bottom: 1px solid var(--line);
+}
+.shot-row .row-label {
+  font-size: 11px;
+  color: #d9a8bd;
+}
+.shot {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  border-radius: 5px;
+  background: linear-gradient(180deg, rgba(255, 120, 170, 0.35), rgba(255, 120, 170, 0.16));
+  border: 1px solid rgba(255, 120, 170, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.shot.on {
+  background: linear-gradient(180deg, rgba(255, 120, 170, 0.6), rgba(255, 120, 170, 0.3));
+  border-color: #ff78aa;
+}
+.shot em {
+  font-size: 9.5px;
+  font-style: normal;
+  color: #ffe1ec;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.shot-edge {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+}
+.shot-edge.left {
+  left: 0;
+  border-left: 2px solid rgba(255, 220, 235, 0.8);
+}
+.shot-edge.right {
+  right: 0;
+  border-right: 2px solid rgba(255, 220, 235, 0.8);
+}
+.shot-add {
+  opacity: 0.75;
+}
+.key.cam {
+  background: #ff9ec8;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+.key.cam.sel {
+  background: #ff78aa;
+  box-shadow: 0 0 0 2px rgba(255, 120, 170, 0.3);
+}
+.row.cam-row .row-label {
+  color: #e8c8d8;
+}
+.shot-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.shot-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+}
+.shot-item.on {
+  background: rgba(255, 120, 170, 0.12);
+  border-color: rgba(255, 120, 170, 0.4);
+}
+.shot-name {
+  font-size: 10.5px;
+  color: var(--mut2);
+  width: 22px;
+}
+.tiny-num {
+  width: 46px;
+  background: #0e1017;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 4px;
+  color: var(--txt);
+  font-size: 11px;
+  text-align: center;
+}
+.tiny-num:focus {
+  outline: none;
+  border-color: var(--acc-d);
+}

@@ -13,22 +13,51 @@ import { create } from "zustand";
 import { clamp, mod, rad, deg, wrapPi, type Ease, type Vec } from "../core/math";
 import { type RigPose, solveFK } from "../core/fk";
 import { buildPart, scalePts, rotatePts, translatePts } from "../core/parts";
+import {
+  CAM_REF_HEIGHT,
+  cameraFittingBox,
+  makeCamera,
+  pickActive,
+  removeCameraKey,
+  sampleCamera,
+  setCameraKey,
+  setCameraKeyEase,
+  shiftCameraKeys,
+} from "../core/cameras";
+import { makeLight, makeObject, objectBox as objectBoxOf } from "../core/scenery";
+import { sceneBounds } from "../core/render";
+import { shotAt, timelineAt } from "../core/timeline";
 import { clearKeys, ensureTrack, indexScene, poseRotations, removeKeyAt, rootPosAtFrame, setEaseForKeys, setPosKey, setRotKey, shiftKeys, deleteKeys } from "../core/rig";
 import { centroid, mirrorAxis, mirrorRots, nearestBoneTo, poleFor, rotAimAt, snapshotPose, solveTo, targetOf } from "../core/pose-edit";
 import { mirrorPoint } from "../core/ik";
 import { buildScene, type RigDef } from "../core/rig-build";
-import { applyDemo, DEMOS } from "../presets/demos";
+import { applyCameraDemo, applyDemo, applyScenerySet, DEMOS } from "../presets/demos";
 import { RIG_MAP, RIGS } from "../presets/rigs";
-import { PALETTES, type Bone, type Pose, type RoleKey, type Scene, type ShapePart } from "../core/types";
+import {
+  PALETTES,
+  type Bone,
+  type Camera,
+  type Light,
+  type LightKind,
+  type Pose,
+  type RoleKey,
+  type Scene,
+  type SceneObject,
+  type SceneryKind,
+  type ShapePart,
+  type Shot,
+} from "../core/types";
 import type { DragFeedback, View } from "../core/render";
 
-export type Mode = "pose" | "rig" | "art" | "draw";
-export type SelKind = "bone" | "shape" | "chain" | "none";
+export type Mode = "pose" | "rig" | "art" | "draw" | "camera";
+export type SelKind = "bone" | "shape" | "chain" | "object" | "light" | "camera" | "none";
 
 export interface LivePose {
   rot: Record<string, number>;
   root: Vec | null;
   shapes: Record<string, Vec[]>;
+  /** Stage furniture being dragged: scenery, lights and cameras, by id. */
+  objs: Record<string, Vec>;
   empty?: boolean;
 }
 
@@ -44,9 +73,10 @@ const CHAIN_COLORS = ["#7cf0c8", "#ffb347", "#5ec8ff", "#ff7a9c", "#c9a4ff", "#9
 const clone = <T,>(x: T): T =>
   typeof structuredClone === "function" ? structuredClone(x) : (JSON.parse(JSON.stringify(x)) as T);
 
-const emptyLive = (): LivePose => ({ rot: {}, root: null, shapes: {} });
+const emptyLive = (): LivePose => ({ rot: {}, root: null, shapes: {}, objs: {} });
 const liveHasContent = (l: LivePose | null): boolean =>
-  !!l && (Object.keys(l.rot).length > 0 || l.root != null || Object.keys(l.shapes).length > 0);
+  !!l &&
+  (Object.keys(l.rot).length > 0 || l.root != null || Object.keys(l.shapes).length > 0 || Object.keys(l.objs ?? {}).length > 0);
 
 export interface StudioState {
   scene: Scene;
@@ -63,8 +93,13 @@ export interface StudioState {
   showNames: boolean;
   showOnion: number;
   showShadow: boolean;
+  /** Draw camera frustums, light rings and object handles. */
+  showCams: boolean;
+  /** Look through the active camera on the stage (off = free view). */
+  cameraView: boolean;
   selection: { kind: SelKind; id: string | null };
-  keySel: { bone: string; frames: number[] } | null;
+  /** Selected dopesheet keys: `track` is a bone id, or `cam:<cameraId>` for a camera row. */
+  keySel: { track: string; frames: number[] } | null;
   chainPick: string[];
   hover: string | null;
   live: LivePose | null;
@@ -99,13 +134,14 @@ export interface StudioActions {
   fit: () => void;
 
   select: (kind: SelKind, id?: string | null) => void;
-  setKeySel: (bone: string | null, frames?: number[]) => void;
+  setKeySel: (track: string | null, frames?: number[]) => void;
   setHover: (h: string | null) => void;
   setDrag: (d: DragFeedback | null) => void;
   setLive: (patch: Partial<LivePose>) => void;
   clearLive: () => void;
   commitLive: () => void;
-  toggleFlag: (k: "autoKey" | "mirrorX" | "showGrid" | "showBones" | "showHandles" | "showNames" | "showShadow" | "showHelp") => void;
+  toggleFlag: (k: "autoKey" | "mirrorX" | "showGrid" | "showBones" | "showHandles" | "showNames" | "showShadow" | "showCams" | "cameraView" | "showHelp") => void;
+  setSceneFlag: (k: "showLights" | "showObjects", v: boolean) => void;
   setShowOnion: (n: number) => void;
   setAutoKey: (v: boolean) => void;
 
@@ -175,12 +211,94 @@ export interface StudioActions {
   finishDraw: () => void;
   finishLasso: (pts: Vec[], boneId: string) => void;
   setPartKind: (k: string) => void;
+
+  // whole-character framing ----------------------------------------------
+  setRigRoot: (patch: { x?: number; y?: number; rot?: number }) => void;
+  rotateRigBy: (delta: number) => void;
+
+  // scenery ----------------------------------------------------------------
+  addObject: (kind: SceneryKind, at?: Vec) => string;
+  updateObject: (id: string, patch: Partial<SceneObject>) => void;
+  deleteObject: (id: string) => void;
+  reorderObject: (id: string, dir: -1 | 1 | "front" | "back") => void;
+  duplicateObject: (id: string) => void;
+  scatterObjects: (kind: SceneryKind, count: number) => void;
+
+  // lights -----------------------------------------------------------------
+  addLight: (kind: LightKind, at?: Vec) => string;
+  updateLight: (id: string, patch: Partial<Light>) => void;
+  deleteLight: (id: string) => void;
+  attachLightTo: (lightId: string, follow: string | null) => void;
+
+  // cameras ----------------------------------------------------------------
+  addCamera: (at?: Vec, zoom?: number) => string;
+  updateCamera: (id: string, patch: Partial<Camera>) => void;
+  deleteCamera: (id: string) => void;
+  setActiveCamera: (id: string | null) => void;
+  keyCamera: (id?: string, frame?: number) => void;
+  deleteCameraKey: (id: string, frame: number) => void;
+  moveCameraKeys: (id: string, frames: number[], delta: number) => void;
+  easeCameraKeys: (id: string, frames: number[], ease: Ease) => void;
+  clearCameraKeys: (id: string) => void;
+  addShot: (id?: string, start?: number, end?: number) => void;
+  updateShot: (id: string, index: number, patch: Partial<Shot>) => void;
+  deleteShot: (id: string, index: number) => void;
+  frameCameraOnContent: (id?: string) => void;
+  stageDrag: (id: string, p: Vec) => void;
+  zoomCamera: (id: string, factor: number) => void;
+  addExampleScenery: () => void;
+  addExampleCameras: () => void;
+  fitAll: () => void;
 }
 
 export type Studio = StudioState & StudioActions;
 
 let toastSeq = 0;
 let clipboard: { rot: Record<string, number>; root: Vec | null } | null = null;
+
+/**
+ * Write live stage-furniture drags into the scene. Scenery and lights simply move; an animated
+ * camera gets a key at the current frame (a locked-off camera just moves, which is what you want
+ * when you are still blocking the shot).
+ */
+function applyStageEdits(d: Scene, edits: [string, Vec][], frame: number): void {
+  for (const [id, p] of edits) {
+    const obj = d.objects?.find((o) => o.id === id);
+    if (obj) {
+      obj.x = p.x;
+      obj.y = p.y;
+      continue;
+    }
+    const light = d.lights?.find((l) => l.id === id);
+    if (light) {
+      light.x = p.x;
+      light.y = p.y;
+      continue;
+    }
+    const cam = d.cameras?.find((c) => c.id === id);
+    if (cam) {
+      const zoom = cam.keys.length ? sampleCamera(cam, frame, timelineAt(d, frame, cam.id)).zoom : cam.zoom;
+      cam.x = p.x;
+      cam.y = p.y;
+      if (cam.keys.length) {
+        const next = setCameraKey(cam, frame, { x: p.x, y: p.y, zoom });
+        cam.keys = next.keys;
+      }
+    }
+  }
+}
+
+/** `cam:<id>` → `<id>`; bone tracks return null. */
+export const cameraTrack = (track: string): string | null => (track.startsWith("cam:") ? track.slice(4) : null);
+
+const unionBox = (a: { x: number; y: number; w: number; h: number } | null, b: { x: number; y: number; w: number; h: number }) => {
+  if (!a) return { ...b };
+  const x0 = Math.min(a.x, b.x);
+  const y0 = Math.min(a.y, b.y);
+  const x1 = Math.max(a.x + a.w, b.x + b.w);
+  const y1 = Math.max(a.y + a.h, b.y + b.h);
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+};
 
 export const useStudio = create<Studio>()((set, get) => {
   const boot = () => {
@@ -239,15 +357,17 @@ export const useStudio = create<Studio>()((set, get) => {
     const l = live!;
     const shapeEdits = Object.entries(l.shapes);
     const rotEdits = Object.entries(l.rot);
+    const stageEdits = Object.entries(l.objs ?? {});
     if (!autoKey && rotEdits.length === 0 && !l.root) {
-      // only art moved: always applied
-      if (shapeEdits.length)
+      // only art or stage furniture moved: always applied
+      if (shapeEdits.length || stageEdits.length)
         mutate((d) => {
+          applyStageEdits(d, stageEdits, frame);
           for (const [id, pts] of shapeEdits) {
             const s = d.shapes.find((x) => x.id === id);
             if (s) s.pts = pts;
           }
-        }, "move part");
+        }, stageEdits.length ? "move object" : "move part");
       set({ live: null, drag: null });
       return;
     }
@@ -259,11 +379,12 @@ export const useStudio = create<Studio>()((set, get) => {
           if (root) setPosKey(d, root.id, frame, { x: l.root.x - d.root.x, y: l.root.y - d.root.y });
         }
       }
+      applyStageEdits(d, stageEdits, frame);
       for (const [id, pts] of shapeEdits) {
         const s = d.shapes.find((x) => x.id === id);
         if (s) s.pts = pts;
       }
-    }, autoKey ? "pose" : "art move");
+    }, autoKey ? "pose" : "stage move");
     set({ live: null, drag: null });
     if (!autoKey && rotEdits.length) notify("Auto-key is off, so this pose was not recorded — press K to key it", "warn");
   };
@@ -283,6 +404,8 @@ export const useStudio = create<Studio>()((set, get) => {
     showNames: false,
     showOnion: 2,
     showShadow: true,
+    showCams: true,
+    cameraView: true,
     selection: { kind: "bone", id: "hips" },
     keySel: null,
     chainPick: [],
@@ -394,9 +517,25 @@ export const useStudio = create<Studio>()((set, get) => {
       const zoom = clamp(Math.min((s.view.w - pad) / w, (s.view.h - pad) / h), 0.1, 8);
       set({ view: { ...s.view, cam: { x: (x0 + x1) / 2, y: (y0 + y1) / 2, zoom } } });
     },
+    fitAll: () => {
+      const s = get();
+      get().fit();
+      const v = get().view;
+      let box: { x: number; y: number; w: number; h: number } | null = { x: v.cam.x - v.w / (2 * v.cam.zoom), y: v.cam.y - v.h / (2 * v.cam.zoom), w: v.w / v.cam.zoom, h: v.h / v.cam.zoom };
+      for (const ob of s.scene.objects ?? []) if (ob.visible) box = unionBox(box, objectBoxOf(ob, s.scene, s.frame));
+      for (const lt of s.scene.lights ?? []) {
+        if (!lt.visible) continue;
+        box = unionBox(box, { x: lt.x - lt.radius * 0.3, y: lt.y - lt.radius * 0.3, w: lt.radius * 0.6, h: lt.radius * 0.6 });
+      }
+      if (s.scene.ground != null) box = unionBox(box, { x: box.x, y: box.y, w: box.w, h: Math.max(0, s.scene.ground + 40 - box.y) });
+      const pad = 50;
+      const zoom = clamp(Math.min((v.w - pad) / Math.max(40, box.w), (v.h - pad) / Math.max(40, box.h)), 0.05, 8);
+      set({ view: { ...v, cam: { x: box.x + box.w / 2, y: box.y + box.h / 2, zoom } } });
+      notify("Framed the whole set", "info");
+    },
 
     select: (kind, id = null) => set({ selection: { kind, id } }),
-    setKeySel: (bone, frames = []) => set({ keySel: bone ? { bone, frames } : null }),
+    setKeySel: (track, frames = []) => set({ keySel: track ? { track, frames } : null }),
     setHover: (h) => {
       if (get().hover !== h) set({ hover: h });
     },
@@ -405,6 +544,11 @@ export const useStudio = create<Studio>()((set, get) => {
     clearLive: () => set({ live: null, drag: null }),
     commitLive,
     toggleFlag: (k) => set({ [k]: !get()[k] } as Partial<StudioState>),
+    setSceneFlag: (k, v) =>
+      mutate((d) => {
+        if (k === "showLights") d.showLights = v;
+        else d.showObjects = v;
+      }, k === "showLights" ? "lights" : "scenery"),
     setShowOnion: (n) => set({ showOnion: clamp(Math.round(n), 0, 6) }),
     setAutoKey: (v) => set({ autoKey: v }),
 
@@ -474,6 +618,10 @@ export const useStudio = create<Studio>()((set, get) => {
     keySelectedBone: () => {
       const s = get();
       const id = s.selection.id;
+      if (s.selection.kind === "camera" && id) {
+        get().keyCamera(id, s.frame);
+        return;
+      }
       if (s.selection.kind !== "bone" || !id) return notify("Select a bone first", "warn");
       const r = (s.live?.rot?.[id] ?? poseRotations(s.scene, s.frame)[id]) ?? 0;
       mutate((d) => void setRotKey(d, id, s.frame, r), "key bone");
@@ -487,19 +635,40 @@ export const useStudio = create<Studio>()((set, get) => {
     deleteSelectedKeys: () => {
       const s = get();
       if (!s.keySel) return notify("Click a keyframe first", "warn");
-      mutate((d) => void deleteKeys(d, s.keySel!.bone, s.keySel!.frames), "delete keys");
+      const sel = s.keySel;
+      const camId = cameraTrack(sel.track);
+      mutate((d) => {
+        if (camId) {
+          const c = d.cameras?.find((x) => x.id === camId);
+          if (c) for (const f of sel.frames) c.keys = removeCameraKey(c, f).keys;
+        } else void deleteKeys(d, sel.track, sel.frames);
+      }, "delete keys");
       set({ keySel: null });
     },
     moveSelectedKeys: (delta) => {
       const s = get();
       if (!s.keySel) return;
-      mutate((d) => void shiftKeys(d, s.keySel!.bone, s.keySel!.frames, delta), "move keys");
-      set({ keySel: { ...s.keySel, frames: s.keySel.frames.map((f) => clamp(f + delta, 0, s.scene.frames - 1)) } });
+      const sel = s.keySel;
+      const camId = cameraTrack(sel.track);
+      mutate((d) => {
+        if (camId) {
+          const c = d.cameras?.find((x) => x.id === camId);
+          if (c) c.keys = shiftCameraKeys(c, sel.frames, delta, d.frames - 1).keys;
+        } else void shiftKeys(d, sel.track, sel.frames, delta);
+      }, "move keys");
+      set({ keySel: { ...sel, frames: sel.frames.map((f) => clamp(f + delta, 0, s.scene.frames - 1)) } });
     },
     setEaseOnSelected: (ease) => {
       const s = get();
       if (!s.keySel) return notify("Select keyframes in the dopesheet first", "warn");
-      mutate((d) => void setEaseForKeys(d, s.keySel!.bone, s.keySel!.frames, ease), "ease");
+      const sel = s.keySel;
+      const camId = cameraTrack(sel.track);
+      mutate((d) => {
+        if (camId) {
+          const c = d.cameras?.find((x) => x.id === camId);
+          if (c) c.keys = setCameraKeyEase(c, sel.frames, ease).keys;
+        } else void setEaseForKeys(d, sel.track, sel.frames, ease);
+      }, "ease");
       notify(`Ease → ${ease}`, "ok");
     },
     copyPose: () => {
@@ -893,6 +1062,328 @@ export const useStudio = create<Studio>()((set, get) => {
       set({ drawPoints: pts, selection: boneId ? { kind: "bone", id: boneId } : get().selection });
       get().finishDraw();
     },
+
+    /* ------------------------------------------------ whole-character framing */
+    setRigRoot: (patch) =>
+      mutate((d) => {
+        if (patch.x != null) d.root.x = patch.x;
+        if (patch.y != null) d.root.y = patch.y;
+        if (patch.rot != null) d.rootRot = wrapPi(patch.rot);
+      }, "character transform"),
+    rotateRigBy: (delta) => {
+      const s = get();
+      const rootId = indexScene(s.scene).roots[0]?.id;
+      if (!rootId) return;
+      const start = poseRotations(s.scene, s.frame)[rootId] ?? 0;
+      const cur = s.live?.rot?.[rootId] ?? start;
+      setLive({ rot: { ...s.live?.rot, [rootId]: wrapPi(cur + delta) } });
+      // Nudge hint on first use: the root bone's own rotation channel turns the whole character.
+      if (!get().scene.tracks[rootId]?.rot.length && get().autoKey) notify("Turning the character — the key is written at this frame", "info");
+    },
+
+    /* ------------------------------------------------------------- scenery */
+    addObject: (kind, at) => {
+      const s = get();
+      const p = at ?? { x: s.view.cam.x, y: s.scene.ground ?? s.view.cam.y };
+      const obj = makeObject(kind, Math.round(p.x), Math.round(p.y), (s.scene.objects?.length ?? 0) + 1);
+      mutate((d) => {
+        d.objects = [...(d.objects ?? []), obj];
+        if (d.showObjects === undefined) d.showObjects = true;
+      }, `add ${kind}`);
+      set({ selection: { kind: "object", id: obj.id }, mode: get().mode === "pose" ? "camera" : get().mode });
+      notify(`${obj.name} placed — drag it in Camera mode, or select it to tweak`, "ok");
+      return obj.id;
+    },
+    updateObject: (id, patch) =>
+      mutate((d) => {
+        const o = d.objects?.find((x) => x.id === id);
+        if (o) Object.assign(o, patch);
+      }, "scenery props"),
+    deleteObject: (id) =>
+      mutate((d) => {
+        d.objects = (d.objects ?? []).filter((o) => o.id !== id);
+      }, "delete scenery"),
+    reorderObject: (id, dir) =>
+      mutate((d) => {
+        const list = [...(d.objects ?? [])].sort((a, b) => a.z - b.z);
+        const i = list.findIndex((o) => o.id === id);
+        if (i < 0) return;
+        const j = dir === "front" ? list.length - 1 : dir === "back" ? 0 : clamp(i + dir, 0, list.length - 1);
+        const [it] = list.splice(i, 1);
+        list.splice(j, 0, it);
+        // keep z in a sensible band: 0.04 (far sky) … 3 (right in front)
+        list.forEach((o, k) => {
+          const real = d.objects?.find((x) => x.id === o.id);
+          if (real) real.z = k === 0 ? 0.05 : k === list.length - 1 ? 3 : 0.5 + (k / Math.max(1, list.length - 1)) * 1.6;
+        });
+        const moving = d.objects?.find((x) => x.id === id);
+        if (moving && (dir === "front" || (dir === 1 && j === list.length - 1))) moving.z = 3;
+        if (moving && (dir === "back" || (dir === -1 && j === 0))) moving.z = 0.05;
+      }, "scenery order"),
+    duplicateObject: (id) => {
+      const s = get();
+      const src = (s.scene.objects ?? []).find((o) => o.id === id);
+      if (!src) return;
+      const copy: SceneObject = {
+        ...clone(src),
+        id: `O${Math.random().toString(36).slice(2, 7)}`,
+        x: src.x + 40,
+        seed: (src.seed ?? 1) + 7,
+      };
+      mutate((d) => {
+        d.objects = [...(d.objects ?? []), copy];
+      }, "duplicate scenery");
+      set({ selection: { kind: "object", id: copy.id } });
+    },
+    scatterObjects: (kind, count) => {
+      const s = get();
+      const ground = s.scene.ground ?? s.scene.root.y + 60;
+      const span = Math.max(400, s.view.w / s.view.cam.zoom);
+      const made: SceneObject[] = [];
+      for (let i = 0; i < count; i++) {
+        const t = count === 1 ? 0.5 : i / (count - 1);
+        const x = s.view.cam.x - span / 2 + span * t + (Math.random() - 0.5) * (span / count) * 0.7;
+        const ob = makeObject(kind, Math.round(x), Math.round(ground + (Math.random() - 0.5) * 6), i + 1);
+        ob.scale = 0.75 + Math.random() * 0.6;
+        made.push(ob);
+      }
+      mutate((d) => {
+        d.objects = [...(d.objects ?? []), ...made];
+        if (d.showObjects === undefined) d.showObjects = true;
+      }, `scatter ${kind}`);
+      notify(`${count} × ${kind} scattered along the ground`, "ok");
+    },
+
+    /* -------------------------------------------------------------- lights */
+    addLight: (kind, at) => {
+      const s = get();
+      const p = at ?? { x: s.view.cam.x, y: (s.scene.ground ?? s.view.cam.y) - 40 };
+      const light = makeLight(kind, Math.round(p.x), Math.round(p.y));
+      mutate((d) => {
+        d.lights = [...(d.lights ?? []), light];
+        if (d.showLights === undefined) d.showLights = true;
+      }, `add ${kind} light`);
+      set({ selection: { kind: "light", id: light.id } });
+      notify(`${light.name} added — drag the dot to move it, ring shows its reach`, "ok");
+      return light.id;
+    },
+    updateLight: (id, patch) =>
+      mutate((d) => {
+        const l = d.lights?.find((x) => x.id === id);
+        if (l) Object.assign(l, patch);
+      }, "light props"),
+    deleteLight: (id) =>
+      mutate((d) => {
+        d.lights = (d.lights ?? []).filter((l) => l.id !== id);
+      }, "delete light"),
+    attachLightTo: (lightId, follow) =>
+      mutate((d) => {
+        const l = d.lights?.find((x) => x.id === lightId);
+        const target = follow ? (d.objects ?? []).find((o) => o.id === follow) : null;
+        if (!l) return;
+        l.follow = follow;
+        // Lights that ride an object keep their offset relative to it.
+        if (target) {
+          l.x = 0;
+          l.y = follow ? -Math.max(10, 30 * target.scale) : l.y;
+        }
+      }, "light follow"),
+
+    /* ------------------------------------------------------------- cameras */
+    addCamera: (at, zoom) => {
+      const s = get();
+      const list = s.scene.cameras ?? [];
+      const x = at?.x ?? s.view.cam.x;
+      const y = at?.y ?? s.view.cam.y;
+      // The free view's zoom is pixels-per-unit at the stage height; a camera stores it at 720px.
+      const z = zoom ?? s.view.cam.zoom * (CAM_REF_HEIGHT / Math.max(1, s.view.h));
+      const cam = makeCamera(Math.round(x), Math.round(y), z, `Camera ${list.length + 1}`, [
+        { start: 0, end: Math.max(1, s.scene.frames - 1) },
+      ]);
+      mutate((d) => {
+        d.cameras = [...(d.cameras ?? []), cam];
+        d.activeCamera = cam.id;
+      }, "add camera");
+      set({ selection: { kind: "camera", id: cam.id }, mode: "camera" });
+      notify(`${cam.name} is now framing the stage — wheel zooms it, K keys a camera move`, "ok");
+      return cam.id;
+    },
+    updateCamera: (id, patch) =>
+      mutate((d) => {
+        const c = d.cameras?.find((x) => x.id === id);
+        if (!c) return;
+        const moving = patch.x != null || patch.y != null || patch.zoom != null;
+        Object.assign(c, patch);
+        // A keyed camera is defined by its keys, so nudging it at a frame must write one —
+        // otherwise the edit would silently do nothing on playback.
+        if (moving && c.keys.length) {
+          const f = get().frame;
+          const sm = sampleCamera(c, f, timelineAt(d, f, c.id));
+          c.keys = setCameraKey(c, f, { x: patch.x ?? sm.x, y: patch.y ?? sm.y, zoom: patch.zoom ?? sm.zoom }).keys;
+        }
+      }, "camera props"),
+    deleteCamera: (id) => {
+      mutate((d) => {
+        d.cameras = (d.cameras ?? []).filter((c) => c.id !== id);
+        if (d.activeCamera === id) d.activeCamera = d.cameras[0]?.id ?? null;
+      }, "delete camera");
+      set({ selection: { kind: "none", id: null }, live: null });
+    },
+    setActiveCamera: (id) => {
+      mutate((d) => void (d.activeCamera = id), "active camera");
+      if (id) {
+        const cam = get().scene.cameras?.find((c) => c.id === id);
+        set({ selection: { kind: "camera", id } });
+        const shot = shotAt(cam ?? null, get().frame);
+        if (shot) get().setFrame(clamp(get().frame, shot.start, shot.end));
+        notify(`${cam?.name ?? "Camera"} framing${shot ? ` · shot ${shot.start}–${shot.end}` : ""}`, "ok");
+      } else {
+        notify("Free view — no camera framing", "info");
+      }
+    },
+    keyCamera: (id, frame) => {
+      const s = get();
+      const cam = pickActive(s.scene, id ?? s.scene.activeCamera) ?? (s.scene.cameras ?? [])[0];
+      if (!cam) return notify("Add a camera first (Stage tab → + camera)", "warn");
+      const f = frame ?? s.frame;
+      const tl = timelineAt(s.scene, f, cam.id);
+      const sample = sampleCamera(cam, f, tl);
+      mutate((d) => {
+        const c = d.cameras?.find((x) => x.id === cam.id);
+        if (!c) return;
+        c.keys = setCameraKey(c, f, sample).keys;
+      }, "key camera");
+      notify(`${cam.name} keyed at frame ${f}`, "ok");
+    },
+    deleteCameraKey: (id, frame) =>
+      mutate((d) => {
+        const c = d.cameras?.find((x) => x.id === id);
+        if (c) c.keys = removeCameraKey(c, frame).keys;
+      }, "delete camera key"),
+    moveCameraKeys: (id, frames, delta) =>
+      mutate((d) => {
+        const c = d.cameras?.find((x) => x.id === id);
+        if (c) c.keys = shiftCameraKeys(c, frames, delta, d.frames - 1).keys;
+      }, "move camera keys"),
+    easeCameraKeys: (id, frames, ease) =>
+      mutate((d) => {
+        const c = d.cameras?.find((x) => x.id === id);
+        if (c) c.keys = setCameraKeyEase(c, frames, ease).keys;
+      }, "camera ease"),
+    clearCameraKeys: (id) =>
+      mutate((d) => {
+        const c = d.cameras?.find((x) => x.id === id);
+        if (c) c.keys = [];
+      }, "clear camera keys"),
+    addShot: (id, start, end) => {
+      const s = get();
+      const camId = id ?? (s.selection.kind === "camera" ? s.selection.id : null) ?? s.scene.activeCamera ?? (s.scene.cameras ?? [])[0]?.id;
+      if (!camId) return notify("Add a camera first (Stage tab → + camera)", "warn");
+      let made: Shot | null = null;
+      mutate((d) => {
+        const cam = d.cameras?.find((c) => c.id === camId);
+        if (!cam) return;
+        const last = d.frames - 1;
+        const sorted = [...cam.shots].sort((a, b) => a.start - b.start);
+        const st = clamp(Math.round(start ?? get().frame), 0, last);
+        const host = sorted.find((sh) => st >= sh.start && st <= sh.end);
+        const next = sorted.find((sh) => sh.start > st);
+        // Where the new take may end: the host's tail, the next take, or the scene.
+        let en = clamp(Math.round(end ?? (host ? host.end : (next ? next.start - 1 : last))), st, host ? host.end : next ? next.start - 1 : last);
+        if (en <= st) en = Math.min(last, st + 1);
+        if (en <= st) {
+          notify("There is no room for another shot at that frame", "warn");
+          return;
+        }
+        // Cut through the take we are standing in: the old one keeps everything before us.
+        const rest = host && st > host.start ? sorted.map((sh) => (sh === host ? { start: host.start, end: st - 1 } : sh)) : sorted.filter((sh) => sh !== host);
+        made = { start: st, end: en };
+        cam.shots = [...rest, made].sort((a, b) => a.start - b.start);
+        d.activeCamera = camId;
+      }, "add shot");
+      if (made) {
+        const shot: Shot = made;
+        notify(`Shot ${shot.start}–${shot.end} on this camera — the timeline now loops inside it`, "ok");
+        get().setFrame(shot.start);
+      }
+    },
+    updateShot: (id, index, patch) =>
+      mutate((d) => {
+        const cam = d.cameras?.find((c) => c.id === id);
+        if (!cam) return;
+        const sorted = [...cam.shots].sort((a, b) => a.start - b.start);
+        const shot = sorted[index];
+        if (!shot) return;
+        const prev = sorted[index - 1];
+        const next = sorted[index + 1];
+        const lo = prev ? prev.end + 1 : 0;
+        const hi = next ? next.start - 1 : d.frames - 1;
+        const start = clamp(Math.round(patch.start ?? shot.start), lo, hi - 1);
+        const end = clamp(Math.round(patch.end ?? shot.end), start + 1, hi);
+        shot.start = start;
+        shot.end = end;
+      }, "shot range"),
+    deleteShot: (id, index) =>
+      mutate((d) => {
+        const cam = d.cameras?.find((c) => c.id === id);
+        if (!cam) return;
+        const sorted = [...cam.shots].sort((a, b) => a.start - b.start);
+        const shot = sorted[index];
+        if (shot) cam.shots = cam.shots.filter((s) => s !== shot);
+      }, "delete shot"),
+    frameCameraOnContent: (id) => {
+      const s = get();
+      const cam = pickActive(s.scene, id ?? s.scene.activeCamera) ?? (s.scene.cameras ?? [])[0];
+      if (!cam) return notify("Add a camera first", "warn");
+      const tl = timelineAt(s.scene, s.frame, cam.id);
+      let box: { x: number; y: number; w: number; h: number } | null = null;
+      for (let f = tl.start; f <= tl.end; f++) {
+        box = unionBox(box, sceneBounds(s.scene, solveFK(s.scene, poseRotations(s.scene, f), f)));
+      }
+      if (!box) return;
+      const sample = cameraFittingBox(box, s.view.w, s.view.h, 1.18);
+      mutate((d) => {
+        const c = d.cameras?.find((x) => x.id === cam.id);
+        if (!c) return;
+        c.x = Math.round(sample.x);
+        c.y = Math.round(sample.y);
+        c.zoom = sample.zoom;
+      }, "frame camera");
+      notify(`${cam.name} framed on the action of shot ${tl.start}–${tl.end}${cam.keys.length ? " (keys are offsets — re-key to apply)" : ""}`, "ok");
+    },
+    stageDrag: (id, p) => setLive({ objs: { ...(get().live?.objs ?? {}), [id]: p } }),
+    addExampleScenery: () => {
+      let n = 0;
+      mutate((d) => {
+        n = applyScenerySet(d);
+      }, "example scenery");
+      notify(`Added ${n} scenery objects and two lights — tweak any of them in the Set tab`, "ok");
+    },
+    addExampleCameras: () => {
+      let n = 0;
+      mutate((d) => {
+        n = applyCameraDemo(d);
+      }, "example cameras");
+      set({ mode: "camera", selection: { kind: "camera", id: get().scene.activeCamera ?? null } });
+      notify(`${n} cameras with shots — the timeline now cuts at the shot change`, "ok");
+    },
+    zoomCamera: (id, factor) => {
+      const s = get();
+      const cam = s.scene.cameras?.find((c) => c.id === id);
+      if (!cam) return;
+      const f = s.frame;
+      const cur = cam.keys.length ? sampleCamera(cam, f, timelineAt(s.scene, f, id)).zoom : cam.zoom;
+      const zoom = clamp(cur * factor, 0.05, 24);
+      mutate((d) => {
+        const c = d.cameras?.find((x) => x.id === id);
+        if (!c) return;
+        c.zoom = zoom;
+        if (c.keys.length) {
+          const sm = sampleCamera(c, f, timelineAt(d, f, id));
+          c.keys = setCameraKey(c, f, { x: sm.x, y: sm.y, zoom }).keys;
+        }
+      }, "camera zoom");
+    },
   };
 });
 
@@ -913,6 +1404,7 @@ const PART_ROLES: Record<string, RoleKey> = {
   hipbox: "cloth2",
   shell: "skin",
   neck: "skin",
+  belt: "cloth2",
   head: "skin",
   snout: "skin",
   jaw: "skin",

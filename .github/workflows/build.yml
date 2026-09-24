@@ -55,7 +55,7 @@ jobs:
       - name: Headless checks
         run: |
           mkdir -p .tmp
-          for check in store-check export-check interact-check; do
+          for check in store-check export-check interact-check scene-check; do
             echo "::group::$check"
             npm exec --silent -- esbuild "scripts/$check.ts" --bundle --platform=node --format=cjs \
               --external:@napi-rs/canvas --outfile=".tmp/$check.cjs" --log-level=warning
@@ -67,7 +67,7 @@ jobs:
         run: |
           npm exec --silent -- esbuild scripts/preview.ts --bundle --platform=node --format=esm \
             --external:@napi-rs/canvas --outfile=.tmp/preview.mjs --log-level=warning
-          node .tmp/preview.mjs kid,robot,dragon,blob 0,6,12 .tmp/preview.png 1 1 300 260
+          node .tmp/preview.mjs kid,cat,ninja,robot,dragon,bird,wizard,blob 0,6,12 .tmp/preview.png 1 1 300 260
 
       - name: Build
         run: npm run build
@@ -212,7 +212,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p .tmp
-          for check in store-check interact-check export-check; do
+          for check in store-check interact-check export-check scene-check; do
             npm exec --silent -- esbuild "scripts/$check.ts" --bundle --platform=node --format=cjs \
               --external:@napi-rs/canvas --outfile=".tmp/$check.cjs" --log-level=warning
             node ".tmp/$check.cjs"
