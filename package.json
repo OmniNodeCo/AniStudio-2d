@@ -8,7 +8,13 @@
     "dev": "vite --host 0.0.0.0 --port 5173",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0 --port 5173",
-    "typecheck": "tsc -b --noEmit"
+    "typecheck": "tsc -b --noEmit",
+    "desktop": "npm run build && electron .",
+    "dist": "npm run build && electron-builder --config electron-builder.yml --publish never",
+    "dist:linux": "npm run build && electron-builder --config electron-builder.yml --publish never --linux AppImage deb",
+    "dist:win": "npm run build && electron-builder --config electron-builder.yml --publish never --win nsis portable",
+    "dist:mac": "npm run build && electron-builder --config electron-builder.yml --publish never --mac dmg --arm64 --x64",
+    "desktop:check": "node scripts/desktop-check.mjs"
   },
   "dependencies": {
     "gifenc": "^1.0.3",
@@ -22,8 +28,14 @@
     "@types/react": "^19.2.2",
     "@types/react-dom": "^19.2.1",
     "@vitejs/plugin-react": "^5.0.4",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",
     "typescript": "^5.9.3",
     "vite": "^7.1.9"
+  },
+  "main": "electron/main.mjs",
+  "author": {
+    "name": "AniStudio 2D contributors"
   }
 }

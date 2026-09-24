@@ -1,0 +1,58 @@
+# The renderer is bundled by Vite; the shell uses only Electron/Node built-ins.
+appId: co.omninode.anistudio2d
+productName: AniStudio 2D
+executableName: anistudio-2d
+directories:
+  output: release
+  buildResources: desktop-assets
+files:
+  - dist/**
+  - electron/main.mjs
+  - package.json
+  - "!**/node_modules/**"
+  - "!**/*.map"
+asar: true
+npmRebuild: false
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  artifactName: AniStudio-2D-${version}-windows-${arch}-setup.${ext}
+portable:
+  artifactName: AniStudio-2D-${version}-windows-${arch}-portable.${ext}
+
+# CI deliberately builds unsigned apps. Signing/notarization needs separate credentials/config.
+mac:
+  # Ad-hoc signing supports Apple silicon without a Developer ID certificate.
+  identity: "-"
+  hardenedRuntime: false
+  notarize: false
+  category: public.app-category.graphics-design
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+dmg:
+  artifactName: AniStudio-2D-${version}-macos-${arch}.${ext}
+
+linux:
+  category: Graphics
+  synopsis: 2D animation studio with inverse kinematics
+  maintainer: OmniNodeCo <OmniNodeCo@users.noreply.github.com>
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+appImage:
+  artifactName: AniStudio-2D-${version}-linux-${arch}.${ext}
+deb:
+  artifactName: AniStudio-2D-${version}-linux-${arch}.${ext}

@@ -11,3 +11,6 @@ test-results/
 
 # typescript incremental build info
 *.tsbuildinfo
+
+# electron-builder output
+release/

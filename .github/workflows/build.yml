@@ -2,6 +2,8 @@ name: Build
 
 # Every push to main and every pull request: typecheck, run the headless checks that cover the
 # animation core (store, exports, hit-testing/IK), bundle the app and smoke-test the built site.
+# After verification the desktop shell is packaged into installers for
+# Linux / Windows / macOS on three parallel runners — see the `desktop` job.
 
 on:
   push:
@@ -25,6 +27,8 @@ concurrency:
 
 env:
   NODE_VERSION: "22"
+  # electron-builder fetches the target runtime when packaging. Web-only jobs need no binary.
+  ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
 
 jobs:
   build:
@@ -41,6 +45,9 @@ jobs:
 
       - name: Install
         run: npm ci --no-audit --no-fund
+
+      - name: Desktop shell checks
+        run: npm run desktop:check
 
       - name: Typecheck
         run: npm run typecheck
@@ -100,6 +107,86 @@ jobs:
           path: .tmp/preview.png
           if-no-files-found: warn
           retention-days: 14
+
+  # Native packages are built on their matching OS, including PRs (no publishing/secrets).
+  desktop:
+    name: Desktop · ${{ matrix.label }}
+    needs: [build, ports]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      # A macOS-only failure should not throw away the Linux and Windows installers.
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux
+            os: ubuntu-24.04
+            script: dist:linux
+            cache: |
+              ~/.cache/electron
+              ~/.cache/electron-builder
+          - label: windows
+            os: windows-latest
+            script: dist:win
+            cache: |
+              ~/AppData/Local/electron/Cache
+              ~/AppData/Local/electron-builder/Cache
+          - label: macos
+            os: macos-latest
+            script: dist:mac
+            cache: |
+              ~/Library/Caches/electron
+              ~/Library/Caches/electron-builder
+    env:
+      # Unsigned CI artifacts; signing requires separately configured certificates/notarization.
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # The Electron runtime (~100 MB per OS) plus nsis/fpm helpers: cached between runs, keyed on
+      # the lockfile, because re-downloading them is most of this job's wall time.
+      - name: Cache Electron downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ matrix.cache }}
+          key: electron-${{ matrix.label }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: electron-${{ matrix.label }}-
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Linux packaging and smoke-test dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libarchive-tools xvfb xauth libgtk-3-0t64 libnss3 libasound2t64
+
+      - name: Build the site and package it
+        run: npm run ${{ matrix.script }}
+
+      - name: Smoke-test the packaged Linux app
+        if: runner.os == 'Linux'
+        # --no-sandbox is confined to the headless CI runner, never enabled by the app itself.
+        run: timeout 60s xvfb-run -a release/linux-unpacked/anistudio-2d --no-sandbox --smoke-test
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: anistudio-2d-desktop-${{ matrix.label }}
+          path: |
+            release/*.AppImage
+            release/*.deb
+            release/*.exe
+            release/*.dmg
+            release/*.blockmap
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
 
   ports:
     name: Core on ${{ matrix.os }}

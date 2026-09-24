@@ -6,7 +6,7 @@ with real inverse kinematics. Every pose you make is written straight into keyfr
 scrubs, loops and exports like an ordinary animation.
 
 ```bash
-npm install     # deps are already installed in this sandbox
+npm ci          # install the locked dependencies
 npm run dev     # → http://localhost:5173  (open it in the preview)
 ```
 
@@ -107,7 +107,22 @@ npx esbuild scripts/preview.ts --bundle --platform=node --format=esm --external:
   headless suites, `vite build`, then a smoke test that serves `dist/` with `vite preview` and
   asserts `index.html` and every hashed asset come back. A second job runs the same suites on
   macOS and Windows (that is where the `@napi-rs/canvas` platform binary gets exercised). Uploads
-  the site bundle and a contact-sheet preview as artifacts.
+  the site bundle and a contact-sheet preview as artifacts. After those checks pass, a desktop
+  matrix builds **Windows, Linux and macOS executables** (including on PRs and manual runs).
+  The Linux job also launches the packaged app headlessly and checks that its canvas renders.
+  Find installers under **Actions → Build → a successful run → Artifacts**:
+
+  | Artifact | Contents |
+  | --- | --- |
+  | `anistudio-2d-desktop-windows` | x64 NSIS setup `.exe` and portable `.exe` |
+  | `anistudio-2d-desktop-linux` | x64 `.AppImage` and `.deb` |
+  | `anistudio-2d-desktop-macos` | Apple silicon (arm64) and Intel (x64) `.dmg` |
+
+  These builds are not publisher-signed (macOS uses ad-hoc signing) and are retained for 14 days.
+  Windows SmartScreen and macOS Gatekeeper
+  may warn or block launch; Developer ID signing/notarization is not configured. For AppImage, first run
+  `chmod +x AniStudio-2D-*.AppImage`; some Linux distributions require FUSE/user-namespace setup.
+  The app keeps Chromium's sandbox enabled; it is disabled only for the headless CI smoke test.
 - **`.github/workflows/release.yml`** — push a tag (`git tag -a v0.2.0 -m "..." && git push origin v0.2.0`)
   and it re-runs the checks (a release never ships on an unverified commit), zips the static build,
   renders a preview still, and publishes a GitHub Release with `AniStudio-2D-<version>-web.zip` +
@@ -115,6 +130,26 @@ npx esbuild scripts/preview.ts --bundle --platform=node --format=esm --external:
   create the tag on the commit you ran it from.
   Set the repository variable `PUBLISH_PAGES=true` (and point Pages at the `gh-pages` branch) to
   also push each release's site to Pages.
+
+### Build desktop apps locally
+
+Use Node 22.12+ and run on the target OS (macOS packaging requires a Mac):
+
+```bash
+npm ci
+npm run desktop        # build the web renderer, then launch it in Electron
+npm run dist:win       # Windows: NSIS installer + portable executable
+npm run dist:linux     # Linux: AppImage + Debian package
+npm run dist:mac       # macOS: DMGs for arm64 + x64
+npm run desktop:check # shell unit checks using a stubbed Electron API
+```
+
+Output goes to the ignored `release/` directory. `electron-builder.yml` configures packaging;
+`electron/main.mjs` loads the bundled studio without a dev server, with Node integration off,
+context isolation and sandboxing on. Existing project imports and export downloads work through
+Chromium; exports get a native save dialog. Regenerate the icon with `node scripts/make-icon.mjs`.
+Packaging scripts use `--publish never`: **build.yml uploads Actions artifacts only**; the existing
+`release.yml` still publishes its web zip and preview, not the desktop installers.
 
 Node 22 is what CI uses (`vite 7` needs Node ≥ 20.19).
 
