@@ -101,6 +101,23 @@ npx esbuild scripts/preview.ts --bundle --platform=node --format=esm --external:
   && node .tmp/preview.mjs kid,robot,dragon,blob 0,6,12 out.png 1 1 460 380   # contact sheet
 ```
 
+## CI & releases
+
+- **`.github/workflows/build.yml`** — on every push to `main` and every PR: typecheck, the three
+  headless suites, `vite build`, then a smoke test that serves `dist/` with `vite preview` and
+  asserts `index.html` and every hashed asset come back. A second job runs the same suites on
+  macOS and Windows (that is where the `@napi-rs/canvas` platform binary gets exercised). Uploads
+  the site bundle and a contact-sheet preview as artifacts.
+- **`.github/workflows/release.yml`** — push a tag (`git tag -a v0.2.0 -m "..." && git push origin v0.2.0`)
+  and it re-runs the checks (a release never ships on an unverified commit), zips the static build,
+  renders a preview still, and publishes a GitHub Release with `AniStudio-2D-<version>-web.zip` +
+  `preview.png` and generated notes. You can also dispatch it manually with a tag name — it will
+  create the tag on the commit you ran it from.
+  Set the repository variable `PUBLISH_PAGES=true` (and point Pages at the `gh-pages` branch) to
+  also push each release's site to Pages.
+
+Node 22 is what CI uses (`vite 7` needs Node ≥ 20.19).
+
 ## Keyboard
 
 `1-4` modes · `Space` play/pause · `←/→` step (`Shift` = 5) · `Home/End` first/last frame ·

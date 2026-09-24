@@ -1,0 +1,132 @@
+name: Build
+
+# Every push to main and every pull request: typecheck, run the headless checks that cover the
+# animation core (store, exports, hit-testing/IK), bundle the app and smoke-test the built site.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".github/workflows/release.yml"
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  build:
+    name: Typecheck · checks · bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Headless checks
+        run: |
+          mkdir -p .tmp
+          for check in store-check export-check interact-check; do
+            echo "::group::$check"
+            npm exec --silent -- esbuild "scripts/$check.ts" --bundle --platform=node --format=cjs \
+              --external:@napi-rs/canvas --outfile=".tmp/$check.cjs" --log-level=warning
+            node ".tmp/$check.cjs"
+            echo "::endgroup::"
+          done
+
+      - name: Contact sheet of the real renderer
+        run: |
+          npm exec --silent -- esbuild scripts/preview.ts --bundle --platform=node --format=esm \
+            --external:@napi-rs/canvas --outfile=.tmp/preview.mjs --log-level=warning
+          node .tmp/preview.mjs kid,robot,dragon,blob 0,6,12 .tmp/preview.png 1 1 300 260
+
+      - name: Build
+        run: npm run build
+
+      - name: Smoke-test the built bundle
+        run: |
+          set -euo pipefail
+          test -f dist/index.html || { echo "::error::dist/index.html is missing — the build step did not emit a site"; exit 1; }
+          npx vite preview --port 4173 --host 127.0.0.1 >.tmp/preview-server.log 2>&1 &
+          server=$!
+          trap 'kill $server 2>/dev/null || true' EXIT
+          for _ in $(seq 1 40); do
+            curl -fsS http://127.0.0.1:4173/ >/dev/null 2>&1 && break
+            sleep 0.5
+          done
+          html=$(curl -fsS http://127.0.0.1:4173/ || true)
+          echo "$html" | grep -q 'id="root"' || { echo "::error::index.html is missing the app root"; cat .tmp/preview-server.log; exit 1; }
+          for asset in $(ls dist/assets); do
+            curl -fsS "http://127.0.0.1:4173/assets/$asset" -o /dev/null \
+              || { echo "::error::asset /assets/$asset did not serve"; exit 1; }
+            echo "served $asset"
+          done
+          echo "index.html + $(ls dist/assets | wc -l) asset(s) served from the production build"
+
+      - name: Upload site bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: anistudio-2d-dist
+          path: dist
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-contact-sheet
+          path: .tmp/preview.png
+          if-no-files-found: warn
+          retention-days: 14
+
+  ports:
+    name: Core on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      # @napi-rs/canvas is a platform binary, so the export path is exercised on every OS.
+      - name: Headless checks
+        shell: bash
+        run: |
+          mkdir -p .tmp
+          for check in store-check interact-check export-check; do
+            npm exec --silent -- esbuild "scripts/$check.ts" --bundle --platform=node --format=cjs \
+              --external:@napi-rs/canvas --outfile=".tmp/$check.cjs" --log-level=warning
+            node ".tmp/$check.cjs"
+          done

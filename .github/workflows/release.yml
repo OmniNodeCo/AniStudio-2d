@@ -1,0 +1,165 @@
+name: Release
+
+# Tag a commit `v0.2.0` (or run this workflow manually with a tag name) and you get a GitHub
+# Release carrying the built, ready-to-open web app plus a preview still. Nothing is published on
+# `main` — a release is an explicit act.
+#
+#   git tag -a v0.2.0 -m "..." && git push origin v0.2.0
+#
+# Manual dispatch: pass a tag that does not exist yet and it will be created on the commit you
+# dispatch from, so you can cut a release from the Actions UI alone.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to publish, e.g. v0.2.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+run-name: Release ${{ github.event.inputs.tag || github.ref_name }}
+
+env:
+  NODE_VERSION: "22"
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  release:
+    name: Verify, bundle, publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # full history + tags, so the release notes and tag checks are honest
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      # A release that does not pass the same checks CI runs on every push should not exist.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Headless checks
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp
+          for check in store-check export-check interact-check; do
+            npm exec --silent -- esbuild "scripts/$check.ts" --bundle --platform=node --format=cjs \
+              --external:@napi-rs/canvas --outfile=".tmp/$check.cjs" --log-level=warning
+            node ".tmp/$check.cjs" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Build the app
+        run: npm run build
+
+      - name: Package the release preview
+        run: |
+          npm exec --silent -- esbuild scripts/preview.ts --bundle --platform=node --format=esm \
+            --external:@napi-rs/canvas --outfile=.tmp/preview.mjs --log-level=warning
+          node .tmp/preview.mjs kid,robot,dragon,blob 0,6,12 .tmp/preview.png 0 1 300 260
+
+      - name: Zip the site
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          mkdir -p out
+          # base:"./" in vite.config.ts means asset paths are relative — unzip and open index.html.
+          (cd dist && zip -qr "../out/AniStudio-2D-${version}-web.zip" .)
+          cp .tmp/preview.png out/preview.png
+          ls -l out
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Write the release notes
+        run: |
+          set -euo pipefail
+          {
+            echo "Drag-and-drop 2D animation studio: weld vector parts onto bones, pose with IK, and every drag"
+            echo "is baked into keyframes for you. Built with React + TypeScript on a canvas, no runtime services."
+            echo
+            echo "![AniStudio 2D — kid walk, robot wave, dragon flight, blob bounce](https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/preview.png)"
+            echo
+            echo "## Run it"
+            echo
+            echo "- **Just want to animate:** unzip \`AniStudio-2D-${VERSION}-web.zip\` and open \`index.html\`."
+            echo "- **From source:** \`git checkout ${TAG} && npm ci && npm run dev\` (Node ${NODE_VERSION})."
+            echo
+            echo "## Commits since the last release"
+            echo
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="${TAG}" -q .body 2>/dev/null || echo "_first release — see the commit history._"
+          } > out/notes.md
+          cat out/notes.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "${TAG}" -m "AniStudio 2D ${TAG}"
+            git push origin "refs/tags/${TAG}"
+          fi
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" --title "AniStudio 2D ${VERSION}" --notes-file out/notes.md
+          else
+            gh release create "${TAG}" --title "AniStudio 2D ${VERSION}" --notes-file out/notes.md --latest
+          fi
+          gh release upload "${TAG}" "out/AniStudio-2D-${VERSION}-web.zip" out/preview.png --clobber
+          echo "[AniStudio 2D ${VERSION}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}) published" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload dist for the pages job
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: dist
+
+  pages:
+    name: Publish the app to gh-pages
+    needs: release
+    # Opt-in: set the repository variable PUBLISH_PAGES to "true", and point GitHub Pages at the
+    # `gh-pages` branch (Settings → Pages → Source: Deploy from a branch). Then releases go live.
+    if: ${{ vars.PUBLISH_PAGES == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: site
+
+      - name: Push site/ to the gh-pages branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd site
+          touch .nojekyll
+          git init -b gh-pages .
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -qm "Release ${TAG}"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin "HEAD:refs/heads/gh-pages"
+          echo "Published to the gh-pages branch." >> "$GITHUB_STEP_SUMMARY"
