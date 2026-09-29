@@ -8,7 +8,7 @@ import { ROLES, type LightKind, type RoleKey, type Scene, type SceneObject, type
 import { sampleCamera } from "../core/cameras";
 import { timelineAt } from "../core/timeline";
 import { BackgroundPanel, BuildPanel, ImportPanel, StyleWorkshop } from "./Deck";
-import { SLOTS, type SlotId } from "../core/slots";
+import { SLOTS, slotDef, type SlotId } from "../core/slots";
 
 /* ------------------------------------------------------------- left dock */
 
@@ -294,6 +294,23 @@ function BoneInspector() {
           </select>
         </label>
       </div>
+
+      <label className="field">
+        this bone belongs to
+        <select value={bone.slot ?? "body"} onChange={(e) => a.updateBone(bone.id, { slot: e.target.value as SlotId })}>
+          {SLOTS.map((sl) => (
+            <option key={sl.id} value={sl.id}>
+              {sl.label}
+              {sl.required ? " (always on)" : ""}
+            </option>
+          ))}
+        </select>
+      </label>
+      <p className="tip">
+        {slotDef(bone.slot ?? "body").required
+          ? "The body slot is the only one a character must have — it carries the root and the trunk."
+          : `Optional. Switch “${slotDef(bone.slot ?? "body").label}” off in the Build tab and this bone (and everything under it) goes with it.`}
+      </p>
 
       <label className="slider">
         <span>rest {deg(bone.rest).toFixed(0)}°</span>
