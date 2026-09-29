@@ -1,7 +1,7 @@
 name: Build
 
 # Every push to main and every pull request: typecheck, run the headless checks that cover the
-# animation core (store, exports, hit-testing/IK, set/camera), bundle the app and smoke-test the
+# animation core (store, exports, hit-testing/IK, set/camera, character builder), bundle the app and smoke-test the
 # built site. After verification the desktop shell is packaged on three parallel runners into the
 # same installers release.yml publishes — Windows setup + portable, macOS dmg + zip, Linux
 # AppImage + deb + rpm — see the `desktop` job.
@@ -56,7 +56,7 @@ jobs:
       - name: Headless checks
         run: |
           mkdir -p .tmp
-          for check in store-check export-check interact-check scene-check; do
+          for check in store-check export-check interact-check scene-check build-check; do
             echo "::group::$check"
             npm exec --silent -- esbuild "scripts/$check.ts" --bundle --platform=node --format=cjs \
               --external:@napi-rs/canvas --outfile=".tmp/$check.cjs" --log-level=warning
@@ -245,7 +245,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p .tmp
-          for check in store-check interact-check export-check scene-check; do
+          for check in store-check interact-check export-check scene-check build-check; do
             npm exec --silent -- esbuild "scripts/$check.ts" --bundle --platform=node --format=cjs \
               --external:@napi-rs/canvas --outfile=".tmp/$check.cjs" --log-level=warning
             node ".tmp/$check.cjs"

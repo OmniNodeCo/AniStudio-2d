@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useStudio } from "../state/store";
+import { guessSlot } from "../core/slots";
+import { onImageLoaded } from "../core/images";
+import { isImageFile, readImageFile } from "../io/import";
 import { clamp, simplify, wrapPi, type Vec } from "../core/math";
 import { hitTest, type Hit } from "../core/hit";
 import { poleHandle } from "../core/ik";
@@ -70,6 +73,7 @@ export function Stage() {
   const showCams = useStudio((s) => s.showCams);
   const cameraViewOn = useStudio((s) => s.cameraView);
   const activeCameraId = useStudio((s) => s.scene.activeCamera);
+  const slotArm = useStudio((s) => s.slotArm);
   const busy = useStudio((s) => s.busy);
   const a = useStudio.getState();
 
@@ -82,7 +86,7 @@ export function Stage() {
   const [, force] = useState(0);
   const redraw = useCallback(() => force((n) => n + 1), []);
 
-  const st = { scene, frame, live, mode, view, hover, drag, selection, chainPick, drawPoints, showGrid, showBones, showHandles, showNames, showShadow, showOnion, playing, mirrorX, showCams, cameraViewOn, activeCameraId };
+  const st = { scene, frame, live, mode, view, hover, drag, selection, chainPick, drawPoints, showGrid, showBones, showHandles, showNames, showShadow, showOnion, playing, mirrorX, showCams, cameraViewOn, activeCameraId, slotArm };
 
   // ---------------------------------------------------------------- sizing
   useLayoutEffect(() => {
@@ -102,6 +106,9 @@ export function Stage() {
     a.setView({ w: size.w, h: size.h });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [size.w, size.h]);
+
+  // Imported drawings decode asynchronously — repaint the moment one arrives.
+  useEffect(() => onImageLoaded(redraw), [redraw]);
 
   useEffect(() => {
     const id = window.setTimeout(() => a.fit(), 30);
@@ -181,7 +188,7 @@ export function Stage() {
     const sc = sceneNow();
     const k = 1 / v.cam.zoom;
 
-    paintBackdrop(ctx, scene, W, H);
+    paintBackdrop(ctx, scene, W, H, false, v);
     applyCamera(ctx, v, dpr);
     // Lighting first: the wash tints everything painted on top of it, including the backdrop.
     drawLightWash(ctx, scene, pose, frame, v);
@@ -294,6 +301,26 @@ export function Stage() {
       ctx.restore();
     }
 
+    // draw-mode: show which bone the next sketch will weld to (the Build tab's armed slot)
+    if (mode === "draw" && slotArm) {
+      const target = sceneNow().bones.find((b) => b.slot === slotArm);
+      const pos = target ? poseNow().pos[target.id] : null;
+      if (target && pos) {
+        ctx.save();
+        ctx.setLineDash([6 * k, 5 * k]);
+        ctx.strokeStyle = "#ffd166";
+        ctx.lineWidth = 2.4 * k;
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, 22 * k, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = "#ffd166";
+        ctx.font = `${Math.max(10, 12 * k)}px ui-sans-serif, system-ui, sans-serif`;
+        ctx.fillText(`sketching ${slotArm}`, pos.x + 26 * k, pos.y - 18 * k);
+        ctx.restore();
+      }
+    }
+
     // draw-mode: the shape being traced
     if (mode === "draw" && drawPoints.length) {
       ctx.save();
@@ -325,7 +352,7 @@ export function Stage() {
       ctx.fillText(busy, (W * dpr) / 2, (H * dpr) / 2);
       ctx.restore();
     }
-  }, [st, size.w, size.h, poseNow, sceneNow, redraw, busy, view, frame, scene, live, mode, hover, drag, selection, chainPick, drawPoints, showGrid, showBones, showHandles, showNames, showShadow, showOnion, playing, mirrorX]);
+  }, [st, size.w, size.h, poseNow, sceneNow, redraw, busy, view, frame, scene, live, mode, hover, drag, selection, chainPick, drawPoints, showGrid, showBones, showHandles, showNames, showShadow, showOnion, playing, mirrorX, slotArm]);
 
   // ------------------------------------------------------------ interaction
   const hitOpts = () => ({
@@ -695,9 +722,25 @@ export function Stage() {
     a.zoomAt(factor, toLocal(e.clientX, e.clientY));
   };
 
-  const onDrop = (e: React.DragEvent) => {
+  const onDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setDropHint(false);
+    // Dropping an image file welds it to the bone under the cursor (see the Import tab).
+    const files = Array.from(e.dataTransfer.files ?? []).filter(isImageFile);
+    if (files.length) {
+      const world = toWorld(e.clientX, e.clientY);
+      const bone = nearestBoneTo(scene, poseNow(), world) ?? (selection.kind === "bone" ? selection.id : null) ?? scene.bones[0]?.id;
+      for (const file of files) {
+        try {
+          const art = await readImageFile(file);
+          const slot = slotArm ?? (guessSlot(art.name) ?? undefined);
+          a.importArt(art, { slot, bone: bone ?? null });
+        } catch (err) {
+          a.notify(`${file.name}: ${(err as Error).message}`, "warn");
+        }
+      }
+      return;
+    }
     const kind = e.dataTransfer.getData("application/x-anipart") || e.dataTransfer.getData("text/plain");
     if (!kind) return;
     const world = toWorld(e.clientX, e.clientY);

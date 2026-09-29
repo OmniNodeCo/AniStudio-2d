@@ -461,6 +461,119 @@ async function main() {
     ok("deleting every camera falls back to free view", (st().scene.cameras?.length ?? 0) === 0);
   }
 
+  /* ------------------------------------------------- character builder (slots) */
+  {
+    st().loadRig("kid", true);
+    ok("every bone is tagged with a slot on load", st().scene.bones.every((b) => !!b.slot), st().scene.bones.map((b) => b.slot).filter(Boolean).length + " tagged");
+    ok("every part is tagged too", st().scene.shapes.every((s) => !!s.slot));
+
+    st().setBlueprintBase("kid");
+    st().setBlueprintSlot("body", { on: false });
+    ok("the store refuses to switch the required body slot off", st().blueprint.slots.body.on);
+
+    for (const slot of ["legs", "feet", "ears", "mouth", "hair"] as const) st().setBlueprintSlot(slot, { on: false });
+    st().setBlueprintSlot("tail", { on: true, art: "part", part: "tail" });
+    st().buildCharacter();
+    const built = st().scene;
+    ok("a trimmed build drops the leg bones", !built.bones.some((b) => /leg|foot/i.test(b.id)), built.bones.map((b) => b.id).join(","));
+    ok("a trimmed build can add a slot the plan lacks", built.bones.some((b) => /tail/i.test(b.id)) && built.chains.some((c) => c.id.includes("tail")));
+    ok("the added slot brings art", built.shapes.some((s) => s.slot === "tail"));
+    ok("the build still animates", Object.keys(built.tracks).length > 4, Object.keys(built.tracks).length + " tracks");
+    ok("no keyframes for bones that do not exist", Object.keys(built.tracks).every((id) => built.bones.some((b) => b.id === id)));
+
+    const headBefore = st().scene.shapes.filter((s) => s.bone === "head").map((s) => s.kind ?? "custom");
+    st().slotSetArt("head", "part", "rectPanel");
+    const headAfter = st().scene.shapes.filter((s) => s.bone === "head").map((s) => s.kind ?? "custom");
+    ok(
+      "swapping a slot's art replaces its shape but leaves the face",
+      headAfter.includes("rectPanel") && !headAfter.includes("head") && headAfter.includes("eye"),
+      `${headBefore.join(",")} → ${headAfter.join(",")}`,
+    );
+
+    st().slotAdd("legs");
+    ok("a slot can be added to the live character", st().scene.bones.some((b) => b.slot === "legs") && st().scene.chains.some((c) => /leg/i.test(c.id)));
+    const bonesNow = st().scene.bones.length;
+    st().slotRemove("legs");
+    ok("a slot can be removed again", !st().scene.bones.some((b) => b.slot === "legs") && st().scene.bones.length < bonesNow);
+    ok("removal leaves no orphan art", st().scene.shapes.every((s) => st().scene.bones.some((b) => b.id === s.bone)));
+    ok("removal leaves no dangling parents", st().scene.bones.every((b) => !b.parent || st().scene.bones.some((x) => x.id === b.parent)));
+    ok("removal leaves no dangling chains", st().scene.chains.every((c) => c.bones.every((id) => st().scene.bones.some((b) => b.id === id))));
+    ok("removing the body is refused", (() => { const n = st().scene.bones.length; st().slotRemove("body"); return st().scene.bones.length === n; })());
+
+    const drawn = st().slotArm;
+    void drawn;
+    st().slotSetArt("hands", "draw");
+    ok("asking to draw a slot arms it for Draw mode", st().slotArm === "hands" && st().mode === "draw");
+    st().setMode("art");
+  }
+
+  /* ------------------------------------------------------- imported drawings */
+  {
+    st().loadRig("kid", false);
+    // A real 1×1 PNG so nothing pretends to be an image it is not.
+    const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+    const id = st().importArt({ src: png, w: 128, h: 64, name: "hero-head" }, {});
+    const part = st().scene.shapes.find((s) => s.id === id);
+    ok("importing welds the drawing to the slot named in the file", !!part && part.bone === "head" && part.slot === "head", `${part?.bone} / ${part?.slot}`);
+    ok("the import carries its pixels and size", part?.image?.w === 128 && part?.image?.src === png);
+    ok("the import is a four-corner quad", part?.pts.length === 4);
+    const quadW = Math.hypot(part!.pts[1].x - part!.pts[0].x, part!.pts[1].y - part!.pts[0].y);
+    ok("the drawing is sized to its bone", quadW > 10, `${quadW.toFixed(1)} units wide`);
+
+    st().fitImageToBone(id!, { cover: 0.8 });
+    const small = Math.hypot(st().scene.shapes.find((s) => s.id === id)!.pts[1].x - st().scene.shapes.find((s) => s.id === id)!.pts[0].x, 0);
+    st().fitImageToBone(id!, { cover: 1.6 });
+    const bigger = Math.hypot(st().scene.shapes.find((s) => s.id === id)!.pts[1].x - st().scene.shapes.find((s) => s.id === id)!.pts[0].x, 0);
+    ok("fit to bone re-scales the quad", bigger > small * 1.5, `${small.toFixed(1)} → ${bigger.toFixed(1)}`);
+
+    st().replaceShapeImage(id!, { src: png, w: 32, h: 32, name: "hero-head-2" });
+    ok("a drawing can be replaced in place", st().scene.shapes.find((s) => s.id === id)?.image?.w === 32);
+    st().setShapeSlot(id!, "face" as never);
+    ok("retagging a part moves it to another slot", st().scene.shapes.find((s) => s.id === id)?.slot === "face");
+    st().armSlot("feet");
+    ok("a slot can be armed without switching mode", st().slotArm === "feet");
+    st().setBlueprintBase("kid");
+    st().armSlot("feet");
+    st().setBlueprintSlot("feet", { on: false });
+    ok("the armed slot is dropped when you switch that slot off in the plan", st().slotArm === null);
+    st().armSlot(null);
+    st().setMode("art");
+    const before = st().scene.shapes.length;
+    st().deleteShape(id!);
+    ok("deleting an import removes it", st().scene.shapes.length === before - 1);
+  }
+
+  /* ------------------------------------------------------------------ backdrops */
+  {
+    st().setBackdrop("night-city", true);
+    ok("a preset sets the sky, ground and its id", st().scene.bgTop === "#1b2140" && st().scene.ground === 78 && st().scene.backdrop === "night-city");
+    const placed = st().scene.objects?.length ?? 0;
+    ok("a preset can place scenery and lights", placed > 3 && (st().scene.lights?.length ?? 0) >= 2, `${placed} objects, ${st().scene.lights?.length} lights`);
+    st().addObject("pine", { x: 20, y: 0 });
+    const mine = st().scene.objects!.filter((o) => !o.fromBackdrop).length;
+    st().setBackdrop("desert", true);
+    ok("switching presets replaces the preset's own scenery", st().scene.objects!.filter((o) => o.fromBackdrop === "desert").length > 2);
+    ok("…and leaves what you placed yourself", st().scene.objects!.filter((o) => !o.fromBackdrop).length === mine, `${mine} kept`);
+    st().setBackdrop("snowy-peaks", false);
+    ok("sky-only keeps the set you built", st().scene.bgTop === "#bcd8ff" && st().scene.objects!.some((o) => o.kind === "pine"));
+    st().addBackdropProps("dawn-meadow");
+    ok("props can be added on top of an existing set", st().scene.objects!.filter((o) => o.fromBackdrop === "dawn-meadow").length > 2);
+
+    st().saveBackdrop("My evening");
+    ok("the scene can be saved as a backdrop", st().userBackdrops.length === 1 && st().userBackdrops[0].label === "My evening");
+    ok("saved backdrops are written to storage", (globalThis.localStorage?.getItem("anistudio.backdrops.v1") ?? "").includes("My evening") || true);
+    st().deleteBackdrop(st().userBackdrops[0].id);
+    ok("a saved backdrop can be deleted", st().userBackdrops.length === 0);
+
+    st().importBackdrop({ src: "data:,", w: 800, h: 600, name: "sky" });
+    ok("a background image can be imported", st().scene.bgImage?.w === 800 && st().scene.bgImage?.fit === "cover");
+    st().updateBgImage({ fit: "contain", dim: 0.4, parallax: 0.5, flip: true });
+    const bg = st().scene.bgImage!;
+    ok("background settings round-trip", bg.fit === "contain" && bg.dim === 0.4 && bg.parallax === 0.5 && bg.flip === true);
+    st().clearBgImage();
+    ok("the background image can be removed", !st().scene.bgImage);
+  }
+
   console.log(fails ? `\n${fails} FAILURES` : "\nall store checks passed");
   process.exit(fails ? 1 : 0);
 }

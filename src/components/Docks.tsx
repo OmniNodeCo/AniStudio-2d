@@ -3,32 +3,46 @@ import { useStudio } from "../state/store";
 import { PARTS, PART_GROUPS, buildPart } from "../core/parts";
 import { clamp, deg, EASES, rad, wrapPi, type Ease, type Vec } from "../core/math";
 import { indexScene } from "../core/rig";
-import { RIGS } from "../presets/rigs";
-import { DEMOS, DEMO_LABELS } from "../presets/demos";
 import { LIGHTS, SCENERY, SCENERY_GROUPS, objectBox } from "../core/scenery";
 import { ROLES, type LightKind, type RoleKey, type Scene, type SceneObject, type SceneryKind } from "../core/types";
 import { sampleCamera } from "../core/cameras";
 import { timelineAt } from "../core/timeline";
-import { ExportPanel } from "./ExportPanel";
+import { BackgroundPanel, BuildPanel, ImportPanel, StyleWorkshop } from "./Deck";
+import { SLOTS, type SlotId } from "../core/slots";
 
 /* ------------------------------------------------------------- left dock */
 
+const TABS: { id: DockTab; label: string; hint: string }[] = [
+  { id: "build", label: "Build", hint: "Body plan and optional slots — body, head, eyes, arms, legs…" },
+  { id: "parts", label: "Parts", hint: "Drag a premade part onto a bone" },
+  { id: "import", label: "Import", hint: "Weld your own PNG/JPG/SVG drawings onto bones" },
+  { id: "rig", label: "Rig", hint: "Bones, IK chains and joints" },
+  { id: "backdrop", label: "Backdrop", hint: "Ready-made skies and your own background image" },
+  { id: "set", label: "Set", hint: "Scenery, lights and cameras" },
+  { id: "style", label: "Style", hint: "Palettes, outline and mood" },
+];
+
+type DockTab = "build" | "parts" | "import" | "rig" | "backdrop" | "set" | "style";
+
 export function LeftDock() {
-  const [tab, setTab] = useState<"parts" | "rig" | "set" | "scene">("parts");
+  const [tab, setTab] = useState<DockTab>("build");
   return (
     <aside className="dock left">
       <nav className="tabs">
-        {(["parts", "rig", "set", "scene"] as const).map((t) => (
-          <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>
-            {t === "parts" ? "Parts" : t === "rig" ? "Rig & IK" : t === "set" ? "Set" : "Scene"}
+        {TABS.map((t) => (
+          <button key={t.id} className={tab === t.id ? "on" : ""} onClick={() => setTab(t.id)} title={t.hint}>
+            {t.label}
           </button>
         ))}
       </nav>
       <div className="dock-body">
+        {tab === "build" && <BuildPanel />}
         {tab === "parts" && <PartsLibrary />}
+        {tab === "import" && <ImportPanel />}
         {tab === "rig" && <RigPanel />}
+        {tab === "backdrop" && <BackgroundPanel />}
         {tab === "set" && <StagePanel />}
-        {tab === "scene" && <ScenePanel />}
+        {tab === "style" && <StyleWorkshop />}
       </div>
     </aside>
   );
@@ -209,103 +223,6 @@ function RigPanel() {
         Tip: IK is an authoring tool here — when you drag a handle, AniStudio solves the chain and
         writes the resulting rotations as keyframes, so playback and export never need a solver.
       </p>
-    </div>
-  );
-}
-
-function ScenePanel() {
-  const scene = useStudio((s) => s.scene);
-  const a = useStudio.getState();
-  return (
-    <div className="pane">
-      <h4 className="sec">Start from a rigged character</h4>
-      <div className="rig-grid">
-        {RIGS.map((r) => (
-          <button
-            key={r.id}
-            className={`rig-card ${scene.rigId === r.id ? "on" : ""}`}
-            onClick={() => (r.id === "blank" ? a.newScene() : a.loadRig(r.id, false))}
-            title={r.hint}
-          >
-            <b>{r.label}</b>
-            <span>{r.hint}</span>
-          </button>
-        ))}
-      </div>
-      <h4 className="sec">Build the set</h4>
-      <div className="demo-grid">
-        <button className="ghost" onClick={() => a.addExampleScenery()} title="Hills, foliage, horizon and a key light that matches your sky">
-          🏞 add example scenery
-        </button>
-        <button className="ghost" onClick={() => a.addExampleCameras()} title="An establishing wide and a close-up with a push-in — real shots you can re-time">
-          🎥 add example cameras
-        </button>
-      </div>
-      <h4 className="sec">Generate a starting animation (baked IK + keys)</h4>
-      <div className="demo-grid">
-        {Object.keys(DEMOS).map((d) => (
-          <button key={d} className="ghost" onClick={() => a.applyDemoNow(d)} title={`Generate "${d}" onto the current rig`}>
-            {DEMO_LABELS[d] ?? d}
-          </button>
-        ))}
-      </div>
-      <p className="tip">
-        Demos write real keyframes on your rig: feet get planted, tails get follow-through. Scrub to
-        any frame and drag a handle to fix a pose — that is the whole point.
-      </p>
-      <h4 className="sec">Colours</h4>
-      <PaletteGrid />
-      <h4 className="sec">Backdrop</h4>
-      <div className="grid2">
-        <label className="field">
-          sky
-          <input type="color" value={scene.bgTop} onChange={(e) => a.setBg(e.target.value, scene.bgBottom)} />
-        </label>
-        <label className="field">
-          floor
-          <input type="color" value={scene.bgBottom} onChange={(e) => a.setBg(scene.bgTop, e.target.value)} />
-        </label>
-        <label className="field">
-          outline
-          <input type="color" value={scene.outline} onChange={(e) => a.setOutline(e.target.value)} />
-        </label>
-        <label className="field">
-          ground y
-          <input
-            type="number"
-            value={scene.ground ?? 0}
-            onChange={(e) => a.setGround(Number(e.target.value))}
-          />
-        </label>
-      </div>
-      <label className="check">
-        <input type="checkbox" checked={scene.ground != null} onChange={(e) => a.setGround(e.target.checked ? 80 : null)} />
-        draw ground line &amp; contact shadow
-      </label>
-      <ExportPanel />
-    </div>
-  );
-}
-
-function PaletteGrid() {
-  const scene = useStudio((s) => s.scene);
-  const a = useStudio.getState();
-  return (
-    <div className="role-grid">
-      {ROLES.map((r) => (
-        <label key={r} className="role" title={`Recolour every part using "${r}"`}>
-          <input
-            type="color"
-            value={scene.palette[r]}
-            onChange={(e) =>
-              a.mutate((d) => {
-                d.palette[r] = e.target.value;
-              }, "palette colour")
-            }
-          />
-          <span>{r}</span>
-        </label>
-      ))}
     </div>
   );
 }
@@ -516,7 +433,7 @@ function ShapeInspector() {
   if (!shape) return null;
   return (
     <div className="pane">
-      <h4 className="sec">Part</h4>
+      <h4 className="sec">{shape.image ? "Imported drawing" : "Part"}</h4>
       <input className="name-input" value={shape.name} onChange={(e) => a.updateShape(shape.id, { name: e.target.value })} />
       <label className="field">
         welded to
@@ -528,6 +445,35 @@ function ShapeInspector() {
           ))}
         </select>
       </label>
+      <label className="field">
+        what is this?
+        <select value={shape.slot ?? "body"} onChange={(e) => a.setShapeSlot(shape.id, e.target.value as SlotId)}>
+          {SLOTS.map((sl) => (
+            <option key={sl.id} value={sl.id}>
+              {sl.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      {shape.image && (
+        <div className="row-btns">
+          <button className="ghost" onClick={() => a.fitImageToBone(shape.id, { cover: 1.5, anchor: "start" })} title="Anchor the drawing to the start of its bone">
+            ⇤ anchor start
+          </button>
+          <button className="ghost" onClick={() => a.fitImageToBone(shape.id, { cover: 1.5 })} title="Centre the drawing on its bone">
+            ⇔ centre
+          </button>
+          <button className="ghost" onClick={() => a.fitImageToBone(shape.id, { cover: 1.5, anchor: "end" })} title="Anchor the drawing to the end of its bone">
+            ⇥ anchor end
+          </button>
+          <button className="ghost" onClick={() => a.fitImageToBone(shape.id, { cover: 2.6 })} title="Bigger drawing — covers more of the bone">
+            ⤢ bigger
+          </button>
+          <button className="ghost" onClick={() => a.fitImageToBone(shape.id, { cover: 0.9 })} title="Smaller drawing">
+            ⤡ smaller
+          </button>
+        </div>
+      )}
       <h4 className="sec">Colour</h4>
       <div className="role-chips">
         {ROLES.map((r) => (

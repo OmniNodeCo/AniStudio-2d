@@ -11,7 +11,7 @@
  */
 import { create } from "zustand";
 import { clamp, mod, rad, deg, wrapPi, type Ease, type Vec } from "../core/math";
-import { type RigPose, solveFK } from "../core/fk";
+import { shapeWorldPoints, type RigPose, solveFK } from "../core/fk";
 import { buildPart, scalePts, rotatePts, translatePts } from "../core/parts";
 import {
   CAM_REF_HEIGHT,
@@ -31,6 +31,36 @@ import { clearKeys, ensureTrack, indexScene, poseRotations, removeKeyAt, rootPos
 import { centroid, mirrorAxis, mirrorRots, nearestBoneTo, poleFor, rotAimAt, snapshotPose, solveTo, targetOf } from "../core/pose-edit";
 import { mirrorPoint } from "../core/ik";
 import { buildScene, type RigDef } from "../core/rig-build";
+import {
+  SLOTS,
+  blueprintFor,
+  blueprintIssues,
+  buildFromBlueprint,
+  describeBlueprint,
+  guessSlot,
+  partsForSlot,
+  premadeShape,
+  sceneHasSlot,
+  shapeSlotOf,
+  slotDef,
+  slotSpecForScene,
+  stripSlot,
+  tagSlots,
+  type ArtSource,
+  type Blueprint,
+  type SlotChoice,
+  type SlotId,
+} from "../core/slots";
+import {
+  BACKDROPS,
+  backdropLights,
+  backdropObjects,
+  presetFromScene,
+  type BackdropImage,
+  type BackdropPreset,
+} from "../core/backgrounds";
+import { forgetImage, imageQuadForBone } from "../core/images";
+import { loadSceneImages, type ImportedArt } from "../io/import";
 import { applyCameraDemo, applyDemo, applyScenerySet, DEMOS } from "../presets/demos";
 import { RIG_MAP, RIGS } from "../presets/rigs";
 import {
@@ -48,6 +78,37 @@ import {
   type Shot,
 } from "../core/types";
 import type { DragFeedback, View } from "../core/render";
+
+/* ---------------------------------------------------------------- backdrops */
+
+const BACKDROP_KEY = "anistudio.backdrops.v1";
+
+/** Backdrops you saved yourself live in localStorage; the presets ship with the app. */
+function loadUserBackdrops(): BackdropPreset[] {
+  try {
+    const raw = localStorage.getItem(BACKDROP_KEY);
+    if (!raw) return [];
+    const list = JSON.parse(raw) as BackdropPreset[];
+    return Array.isArray(list) ? list.filter((p) => p && p.id && p.sky) : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistUserBackdrops(list: BackdropPreset[]): void {
+  try {
+    localStorage.setItem(BACKDROP_KEY, JSON.stringify(list));
+  } catch {
+    /* private mode, quota — the presets still work, they just do not outlive the tab */
+  }
+}
+
+export const allBackdrops = (user: BackdropPreset[]): BackdropPreset[] => [...BACKDROPS, ...user];
+export const findBackdrop = (id: string, user: BackdropPreset[]): BackdropPreset | undefined =>
+  BACKDROPS.find((b) => b.id === id) ?? user.find((b) => b.id === id);
+
+/** Length of a bone inside a scene being edited (drafts, so plain lookups). */
+const bLen = (scene: Scene, id: string): number => scene.bones.find((b) => b.id === id)?.length ?? 40;
 
 export type Mode = "pose" | "rig" | "art" | "draw" | "camera";
 export type SelKind = "bone" | "shape" | "chain" | "object" | "light" | "camera" | "none";
@@ -110,6 +171,12 @@ export interface StudioState {
   toast: Toast | null;
   drawPoints: Vec[];
   partKind: string;
+  /** Character-builder configuration: which slots the next character gets, and its art source. */
+  blueprint: Blueprint;
+  /** Slot the Draw/Import tools are currently filling (set by the Build panel). */
+  slotArm: SlotId | null;
+  /** Backdrops you saved from your own scenes (localStorage). */
+  userBackdrops: BackdropPreset[];
   busy: string | null;
   showHelp: boolean;
 }
@@ -212,6 +279,31 @@ export interface StudioActions {
   finishLasso: (pts: Vec[], boneId: string) => void;
   setPartKind: (k: string) => void;
 
+  // character builder (slots, optional parts, imported art) ------------------
+  setBlueprintBase: (id: string) => void;
+  setBlueprintSlot: (slot: SlotId, patch: Partial<SlotChoice>) => void;
+  resetBlueprint: () => void;
+  buildCharacter: () => void;
+  slotAdd: (slot: SlotId) => void;
+  slotRemove: (slot: SlotId) => void;
+  slotSetArt: (slot: SlotId, art: ArtSource, part?: string) => void;
+  armSlot: (slot: SlotId | null) => void;
+  setShapeSlot: (id: string, slot: SlotId) => void;
+  weldToSlot: (id: string, slot: SlotId) => void;
+  importArt: (art: ImportedArt, opts?: { slot?: SlotId | null; bone?: string | null; as?: "part" | "backdrop" }) => string | null;
+  importDrawingNow: (id: string) => void;
+  replaceShapeImage: (id: string, art: ImportedArt) => void;
+  fitImageToBone: (id: string, opts?: { cover?: number; anchor?: "center" | "start" | "end"; flip?: boolean }) => void;
+
+  // backdrops ---------------------------------------------------------------
+  setBackdrop: (id: string, withProps?: boolean) => void;
+  addBackdropProps: (id: string) => void;
+  saveBackdrop: (label: string) => void;
+  deleteBackdrop: (id: string) => void;
+  importBackdrop: (art: ImportedArt) => void;
+  updateBgImage: (patch: Partial<BackdropImage>) => void;
+  clearBgImage: () => void;
+
   // whole-character framing ----------------------------------------------
   setRigRoot: (patch: { x?: number; y?: number; rot?: number }) => void;
   rotateRigBy: (delta: number) => void;
@@ -304,6 +396,7 @@ export const useStudio = create<Studio>()((set, get) => {
   const boot = () => {
     const def = RIG_MAP.get("kid")!;
     const scene = buildScene(def);
+    tagSlots(scene);
     applyDemo(scene, def.demo);
     return scene;
   };
@@ -418,6 +511,9 @@ export const useStudio = create<Studio>()((set, get) => {
     toast: null,
     drawPoints: [],
     partKind: "torso",
+    blueprint: blueprintFor(RIG_MAP.get("kid") as RigDef),
+    slotArm: null,
+    userBackdrops: loadUserBackdrops(),
     busy: null,
     showHelp: false,
 
@@ -896,10 +992,12 @@ export const useStudio = create<Studio>()((set, get) => {
       set({ selection: { kind: "shape", id }, live: null });
       notify("Part attached to the bone", "ok");
     },
-    deleteShape: (id) =>
+    deleteShape: (id) => {
+      forgetImage(id);
       mutate((d) => {
         d.shapes = d.shapes.filter((s) => s.id !== id);
-      }, "delete part"),
+      }, "delete part");
+    },
     updateShape: (id, patch) =>
       mutate((d) => {
         const s = d.shapes.find((x) => x.id === id);
@@ -996,6 +1094,7 @@ export const useStudio = create<Studio>()((set, get) => {
       const def = RIG_MAP.get(id) as RigDef | undefined;
       if (!def) return;
       const scene = buildScene(def);
+      tagSlots(scene);
       if (withDemo && def.demo) applyDemo(scene, def.demo);
       get().loadScene(scene, `load ${def.label}`, true);
       notify(
@@ -1005,6 +1104,13 @@ export const useStudio = create<Studio>()((set, get) => {
     },
     loadScene: (scene, label = "load", doFit = true) => {
       const { past } = get();
+      tagSlots(scene);
+      // Imported drawings live in the scene as data URLs; decode them in the background.
+      const imports = scene.shapes.filter((sh) => sh.image).length + (scene.bgImage ? 1 : 0);
+      if (imports)
+        void loadSceneImages(scene).then((ok) =>
+          notify(`${ok}/${imports} imported image${imports === 1 ? "" : "s"} decoded`, ok === imports ? "ok" : "warn"),
+        );
       set({
         scene: clone(scene),
         past: [...past, { scene: get().scene, label }].slice(-HISTORY_LIMIT),
@@ -1016,6 +1122,7 @@ export const useStudio = create<Studio>()((set, get) => {
       if (doFit) setTimeout(() => get().fit(), 0);
     },
     newScene: () => {
+      set({ slotArm: null });
       get().loadScene(buildScene(RIGS.find((r) => r.id === "blank")!), "new scene", true);
       notify("Empty stage: Rig mode → drag on the canvas to grow bones from the selected joint", "ok");
       set({ mode: "rig" });
@@ -1024,7 +1131,9 @@ export const useStudio = create<Studio>()((set, get) => {
     finishDraw: () => {
       const s = get();
       const pts = s.drawPoints;
-      const chosen = s.selection.kind === "bone" ? s.selection.id : null;
+      // An armed slot (Build tab → “sketch this”) decides where the shape lands.
+      const armed = s.slotArm ? s.scene.bones.find((b) => b.slot === s.slotArm) : undefined;
+      const chosen = armed?.id ?? (s.selection.kind === "bone" ? s.selection.id : null);
       const boneId = chosen ?? nearestBoneTo(s.scene, basePose(), centroid(pts));
       if (pts.length < 3 || !boneId) {
         notify("Draw a shape (3+ points) while a bone is selected", "warn");
@@ -1042,25 +1151,406 @@ export const useStudio = create<Studio>()((set, get) => {
         const dy = p.y - o.y;
         return { x: dx * cos - dy * sin, y: dx * sin + dy * cos };
       });
+      const slot = s.slotArm ?? s.scene.bones.find((b) => b.id === boneId)?.slot;
       mutate((d) => {
         d.shapes.push({
           id,
-          name: "Custom shape",
+          name: s.slotArm ? `${slotDef(s.slotArm).label} sketch` : "Custom shape",
           bone: boneId,
           pts: local,
           closed: true,
           role: "skin",
           visible: true,
           z: d.shapes.length + 1,
+          slot,
         });
+        tagSlots(d);
       }, "draw shape");
-      set({ drawPoints: [], selection: { kind: "shape", id }, mode: "art", live: null });
-      notify("Shape welded to the bone — it will follow that bone forever", "ok");
+      const filled = s.slotArm;
+      set({ drawPoints: [], selection: { kind: "shape", id }, mode: "art", live: null, slotArm: null });
+      notify(
+        filled
+          ? `${slotDef(filled).label} art drawn and welded to ${s.scene.bones.find((b) => b.id === boneId)?.name ?? boneId}`
+          : "Shape welded to the bone — it will follow that bone forever",
+        "ok",
+      );
     },
     setPartKind: (k) => set({ partKind: k }),
+
+    /* ------------------------------------------------ character builder */
+    setBlueprintBase: (id) => {
+      const def = RIG_MAP.get(id) as RigDef | undefined;
+      if (!def) return;
+      set({ blueprint: blueprintFor(def), slotArm: null });
+      notify(`${def.label} body plan — switch slots on or off, then Build`, "info");
+    },
+    setBlueprintSlot: (slot, patch) => {
+      const bp = get().blueprint;
+      const def = RIG_MAP.get(bp.base) as RigDef | undefined;
+      if (slotDef(slot).required && patch.on === false) {
+        notify("The body slot is required — a character is its body", "warn");
+        return;
+      }
+      set({
+        blueprint: { ...bp, slots: { ...bp.slots, [slot]: { ...bp.slots[slot], ...patch } } },
+        slotArm: patch.on === false && get().slotArm === slot ? null : get().slotArm,
+      });
+      void def;
+    },
+    resetBlueprint: () => {
+      const def = RIG_MAP.get(get().blueprint.base) as RigDef | undefined;
+      if (!def) return;
+      set({ blueprint: blueprintFor(def), slotArm: null });
+      notify("Body plan reset to the starter rig", "info");
+    },
+    buildCharacter: () => {
+      const { blueprint } = get();
+      const def = RIG_MAP.get(blueprint.base) as RigDef | undefined;
+      if (!def) return;
+      const issues = blueprintIssues(def, blueprint);
+      const fatal = issues.filter((i) => i.level === "error");
+      if (fatal.length) {
+        notify(fatal[0].text, "warn");
+        return;
+      }
+      const scene = buildFromBlueprint(def, blueprint);
+      scene.name = def.label;
+      // The starter rig's demo comes along, trimmed to the bones you kept: every demo skips the
+      // steps whose limbs are missing instead of failing, so a legless build still walks its arms.
+      if (def.demo) applyDemo(scene, def.demo);
+      const pending = issues.filter((i) => i.level === "info" && i.text.startsWith("You will draw"));
+      get().loadScene(scene, `build ${def.label}`, true);
+      get().checkpoint(`build ${def.label}`);
+      const drawn = describeBlueprint(def, blueprint);
+      notify(`${def.label}: ${drawn}. Drag the coloured handles to pose it.`, "ok");
+      if (pending.length) notify(pending[0].text, "info");
+      if (fatal.length === 0 && issues.some((i) => i.level === "warn")) notify(issues.find((i) => i.level === "warn")!.text, "warn");
+    },
+    slotAdd: (slot) => {
+      const { scene } = get();
+      const def = RIG_MAP.get(scene.rigId ?? "kid") as RigDef | undefined;
+      if (!def) return;
+      if (sceneHasSlot(scene, slot)) {
+        notify(`${slotDef(slot).label} is already part of this character`, "info");
+        return;
+      }
+      const spec = slotSpecForScene(scene, def, slot);
+      if (!spec.bones.length) {
+        notify(`Nothing to attach ${slotDef(slot).label.toLowerCase()} to — add a body first`, "warn");
+        return;
+      }
+      mutate((d) => {
+        for (const b of spec.bones) {
+          d.bones.push({
+            id: b.id,
+            name: b.d ?? b.id,
+            parent: b.p ?? null,
+            length: b.l,
+            rest: rad(b.a ?? 0),
+            min: b.min == null ? undefined : rad(b.min),
+            max: b.max == null ? undefined : rad(b.max),
+            mirror: b.m ?? null,
+            w: b.w,
+            slot,
+          });
+          ensureTrack(d, b.id);
+        }
+        for (const c of spec.chains) d.chains.push({ id: c.id, name: c.d ?? c.id, bones: c.b, pole: !!c.pole, show: true, color: c.color ?? "#7cf0c8", mirror: c.m ?? null });
+        for (const sh of spec.shapes) {
+          const pts = buildPart(sh.kind, Math.max(16, bLen(d, sh.bone)));
+          d.shapes.push({
+            id: `p${Math.random().toString(36).slice(2, 7)}`,
+            name: sh.name ?? slotDef(slot).label,
+            bone: sh.bone,
+            pts: sh.pts ? sh.pts.map((pt) => ({ ...pt })) : pts,
+            closed: true,
+            role: sh.role,
+            fill: sh.fill,
+            visible: true,
+            z: d.shapes.length + 1,
+            kind: sh.pts ? undefined : sh.kind,
+            slot,
+          });
+        }
+        tagSlots(d);
+      }, `add ${slotDef(slot).label.toLowerCase()}`);
+      const bp = get().blueprint;
+      set({ blueprint: { ...bp, slots: { ...bp.slots, [slot]: { on: true, art: "template" } } } });
+      notify(`${slotDef(slot).label} added — ${spec.bones.length} bone${spec.bones.length === 1 ? "" : "s"}${spec.chains.length ? " + IK" : ""}`, "ok");
+      const first = spec.bones[spec.bones.length - 1];
+      if (first) set({ selection: { kind: "bone", id: first.id } });
+    },
+    slotRemove: (slot) => {
+      const { scene } = get();
+      if (slotDef(slot).required) {
+        notify("The body is required: removing it would leave bones with no character", "warn");
+        return;
+      }
+      const doomed = SLOTS.filter((s) => s.needs === slot && sceneHasSlot(scene, s.id)).map((s) => s.label.toLowerCase());
+      let removed = { bones: 0, shapes: 0 };
+      mutate((d) => {
+        removed = stripSlot(d, slot);
+        tagSlots(d);
+      }, `remove ${slotDef(slot).label.toLowerCase()}`);
+      if (!removed.bones && !removed.shapes) {
+        notify(`Nothing to remove — this character has no ${slotDef(slot).label.toLowerCase()}`, "info");
+        return;
+      }
+      const bp = get().blueprint;
+      set({ blueprint: { ...bp, slots: { ...bp.slots, [slot]: { on: false, art: "template" } } } });
+      const extra = doomed.length ? ` (${doomed.join(", ")} went with it)` : "";
+      notify(`${slotDef(slot).label} removed: ${removed.shapes} piece${removed.shapes === 1 ? "" : "s"}, ${removed.bones} bone${removed.bones === 1 ? "" : "s"}${extra}`, "ok");
+    },
+    slotSetArt: (slot, art, part) => {
+      const { scene } = get();
+      const bones = scene.bones.filter((b) => b.slot === slot || (!b.slot && slotDef(slot).id === "body"));
+      const chosen = part ?? slotDef(slot).preferred;
+      mutate((d) => {
+        // shapeSlotOf knows that an eye drawn on the head bone belongs to the eyes slot.
+        d.shapes = d.shapes.filter((sh) => shapeSlotOf(d, sh) !== slot);
+        if (art === "part") {
+          for (const b of bones) {
+            const live = d.bones.find((x) => x.id === b.id);
+            if (!live) continue;
+            const fresh = premadeShape(chosen, live, d, { name: `${slotDef(slot).label} · ${live.name}`, z: d.shapes.length + 1 });
+            fresh.slot = slot;
+            d.shapes.push(fresh);
+          }
+        }
+      }, `${slotDef(slot).label} art`);
+      const bp = get().blueprint;
+      set({ blueprint: { ...bp, slots: { ...bp.slots, [slot]: { on: true, art, part: art === "part" ? chosen : undefined } } } });
+      const nouns: Record<ArtSource, string> = {
+        template: "the starter art",
+        part: `${partsForSlot(slot).find((p) => p.id === chosen)?.label ?? chosen} welded on`,
+        draw: "nothing yet — Sketch mode draws onto the bone you pick",
+        import: "nothing yet — drop a PNG/JPG/SVG in the Import tab",
+        none: "no art (the bones stay)",
+      };
+      if (art === "draw" || art === "import") {
+        set({ slotArm: slot, mode: art === "draw" ? "draw" : get().mode });
+      } else {
+        set({ slotArm: null });
+      }
+      notify(`${slotDef(slot).label}: ${nouns[art]}`, "ok");
+    },
+    armSlot: (slot) => {
+      set({ slotArm: slot });
+      if (slot) {
+        const { scene } = get();
+        const bone = scene.bones.find((b) => b.slot === slot);
+        if (bone) set({ selection: { kind: "bone", id: bone.id } });
+      }
+    },
+    setShapeSlot: (id, slot) =>
+      mutate((d) => {
+        const shape = d.shapes.find((sh) => sh.id === id);
+        if (shape) shape.slot = slot;
+      }, "label part"),
+    weldToSlot: (id, slot) => {
+      const { scene, frame } = get();
+      const pose = basePose();
+      const bone = scene.bones.find((b) => b.slot === slot);
+      const shape = scene.shapes.find((sh) => sh.id === id);
+      if (!bone || !shape) {
+        notify("This character has no bone for that slot — add it in the Build tab first", "warn");
+        return;
+      }
+      // Move the art into the slot bone's space: same world place, new parent.
+      const worldPts = shapeWorldPoints(shape, pose);
+      const world = { x: pose.pos[bone.id]?.x ?? 0, y: pose.pos[bone.id]?.y ?? 0 };
+      const ang = pose.ang[bone.id] ?? 0;
+      const cos = Math.cos(-ang);
+      const sin = Math.sin(-ang);
+      const local = worldPts.map((pt) => {
+        const dx = pt.x - world.x;
+        const dy = pt.y - world.y;
+        return { x: dx * cos - dy * sin, y: dx * sin + dy * cos };
+      });
+      mutate((d) => {
+        const live = d.shapes.find((sh) => sh.id === id);
+        if (!live) return;
+        live.bone = bone.id;
+        live.pts = local;
+        live.slot = slot;
+      }, `weld to ${bone.name}`);
+      void frame;
+      notify(`Welded to ${bone.name} — it follows that bone now`, "ok");
+    },
+    importArt: (art, opts = {}) => {
+      const { scene, view } = get();
+      const slot = opts.slot ?? guessSlot(art.name);
+      // Prefer a bone that ends a limb: a head drawing belongs on the head bone, not the neck
+      // that carries it, and a hand drawing belongs on the hand.
+      const pickSlotBone = (): typeof scene.bones[number] | undefined => {
+        if (!slot) return undefined;
+        const idx = indexScene(scene);
+        const members = scene.bones.filter((b) => b.slot === slot);
+        const leaves = members.filter((b) => !(idx.children.get(b.id) ?? []).some((c) => c.slot === slot));
+        const pool = leaves.length ? leaves : members;
+        return pool.find((b) => !/far|back|B$|R$/i.test(b.id)) ?? pool[0];
+      };
+      const inSlot = pickSlotBone();
+      const nearestId = nearestBoneTo(scene, basePose(), { x: view.cam.x, y: view.cam.y });
+      const bone =
+        (opts.bone ? scene.bones.find((b) => b.id === opts.bone) : undefined) ??
+        inSlot ??
+        scene.bones.find((b) => b.id === nearestId) ??
+        scene.bones[0];
+      if (!bone) {
+        notify("Grow a bone first (Rig mode) — an imported drawing has to hang off one", "warn");
+        return null;
+      }
+      const id = `img${Math.random().toString(36).slice(2, 7)}`;
+      // Face details sit on the front of the head; everything else hangs off the bone's start,
+      // which is what makes "drop a drawing on a bone" land where you expect.
+      const facial = slot === "eyes" || slot === "mouth";
+      const pts = imageQuadForBone(bone.length, { w: art.w, h: art.h }, facial ? { cover: 0.4 } : { cover: 1.5, anchor: "start" });
+      mutate((d) => {
+        d.shapes.push({
+          id,
+          name: art.name || "Imported drawing",
+          bone: bone.id,
+          pts,
+          closed: true,
+          role: "skin",
+          visible: true,
+          z: d.shapes.length + 1,
+          slot: slot ?? bone.slot,
+          image: { src: art.src, w: art.w, h: art.h, name: art.name },
+        });
+        tagSlots(d);
+      }, "import drawing");
+      set({ selection: { kind: "shape", id }, mode: "art", slotArm: get().slotArm === slot ? null : get().slotArm });
+      notify(
+        `Imported “${art.name}” (${art.w}×${art.h}${art.rasterised ? ", SVG rasterised" : ""}) → ${bone.name}${slot ? ` · ${slotDef(slot).label}` : ""}`,
+        "ok",
+      );
+      return id;
+    },
+    importDrawingNow: (id) => {
+      const shape = get().scene.shapes.find((sh) => sh.id === id);
+      if (shape) void loadSceneImages({ ...get().scene, shapes: [shape], bgImage: undefined });
+    },
+    replaceShapeImage: (id, art) => {
+      const { scene } = get();
+      const shape = scene.shapes.find((sh) => sh.id === id);
+      const bone = shape ? scene.bones.find((b) => b.id === shape.bone) : undefined;
+      if (!shape) return;
+      mutate((d) => {
+        const live = d.shapes.find((sh) => sh.id === id);
+        if (!live) return;
+        live.image = { src: art.src, w: art.w, h: art.h, name: art.name };
+        live.name = art.name || live.name;
+        if (bone) live.pts = imageQuadForBone(bone.length, { w: art.w, h: art.h }, { cover: 1.05 });
+      }, "replace drawing");
+      forgetImage(id);
+      void Promise.resolve().then(() => get().importDrawingNow(id));
+      notify(`“${art.name}” replaced the old drawing`, "ok");
+    },
+    fitImageToBone: (id, opts = {}) => {
+      const { scene } = get();
+      const shape = scene.shapes.find((sh) => sh.id === id);
+      if (!shape?.image) {
+        notify("Only imported drawings can be re-fit to a bone — drawn parts re-fit from the Parts tab", "info");
+        return;
+      }
+      const bone = scene.bones.find((b) => b.id === shape.bone);
+      if (!bone) return;
+      const pts = imageQuadForBone(bone.length, shape.image, opts);
+      mutate((d) => {
+        const live = d.shapes.find((sh) => sh.id === id);
+        if (live) live.pts = pts;
+      }, "fit drawing");
+      notify(`Fitted to ${bone.name} (${Math.round(bone.length)} units long)`, "ok");
+    },
     finishLasso: (pts, boneId) => {
       set({ drawPoints: pts, selection: boneId ? { kind: "bone", id: boneId } : get().selection });
       get().finishDraw();
+    },
+
+    /* ------------------------------------------------------------ backdrops */
+    setBackdrop: (id, withProps = true) => {
+      const preset = findBackdrop(id, get().userBackdrops);
+      if (!preset) return;
+      const { scene } = get();
+      const objects = withProps ? backdropObjects(scene, preset) : [];
+      const lights = withProps ? backdropLights(scene, preset) : [];
+      mutate((d) => {
+        d.bgTop = preset.sky[0];
+        d.bgBottom = preset.sky[1];
+        d.ground = preset.ground;
+        d.backdrop = preset.id;
+        if (withProps) {
+          // Only scenery a previous preset placed is replaced; anything you built stays.
+          d.objects = [...(d.objects ?? []).filter((o) => !o.fromBackdrop), ...objects];
+          d.lights = [...(d.lights ?? []).filter((l) => !l.fromBackdrop), ...lights];
+        }
+      }, `backdrop ${preset.label}`);
+      set({ mode: get().mode === "camera" ? "camera" : get().mode });
+      notify(
+        withProps
+          ? `${preset.label}: sky + ${objects.length} object${objects.length === 1 ? "" : "s"} + ${lights.length} light${lights.length === 1 ? "" : "s"}`
+          : `${preset.label} sky applied (kept your set)`,
+        "ok",
+      );
+    },
+    addBackdropProps: (id) => {
+      const preset = findBackdrop(id, get().userBackdrops);
+      if (!preset) return;
+      const { scene } = get();
+      const objects = backdropObjects(scene, preset);
+      const lights = backdropLights(scene, preset);
+      if (!objects.length && !lights.length) {
+        notify(`${preset.label} is just a sky — nothing to place`, "info");
+        return;
+      }
+      mutate((d) => {
+        d.objects = [...(d.objects ?? []), ...objects];
+        d.lights = [...(d.lights ?? []), ...lights];
+      }, `place ${preset.label}`);
+      notify(`Placed ${objects.length} object(s) and ${lights.length} light(s) from ${preset.label}`, "ok");
+    },
+    saveBackdrop: (label) => {
+      const { scene, userBackdrops } = get();
+      const id = `mine-${Date.now().toString(36)}`;
+      const preset = presetFromScene(scene, label || "My backdrop", id);
+      const next = [...userBackdrops, preset];
+      persistUserBackdrops(next);
+      set({ userBackdrops: next });
+      notify(`Saved “${preset.label}” — it sits at the end of the backdrop list`, "ok");
+    },
+    deleteBackdrop: (id) => {
+      const next = get().userBackdrops.filter((b) => b.id !== id);
+      persistUserBackdrops(next);
+      set({ userBackdrops: next });
+      notify("Backdrop deleted", "info");
+    },
+    importBackdrop: (art) => {
+      mutate((d) => {
+        d.bgImage = {
+          src: art.src,
+          w: art.w,
+          h: art.h,
+          fit: "cover",
+          opacity: 1,
+          dim: 0.25,
+          parallax: 0,
+        };
+        d.backdrop = undefined;
+      }, "import background");
+      void loadSceneImages(get().scene);
+      notify(`Background image imported (${art.w}×${art.h}) — tune the fit and haze below`, "ok");
+    },
+    updateBgImage: (patch) =>
+      mutate((d) => {
+        if (!d.bgImage) return;
+        d.bgImage = { ...d.bgImage, ...patch };
+      }, "background image"),
+    clearBgImage: () => {
+      if (!get().scene.bgImage) return;
+      mutate((d) => void (d.bgImage = undefined), "remove background image");
+      notify("Background image removed — the sky gradient is back", "ok");
     },
 
     /* ------------------------------------------------ whole-character framing */

@@ -6,6 +6,8 @@ import { LeftDock, RightDock } from "./components/Docks";
 import { Timeline } from "./components/Timeline";
 import { HelpModal } from "./components/HelpModal";
 import { parseProject } from "./io/export";
+import { isImageFile, readImageFile } from "./io/import";
+import { guessSlot } from "./core/slots";
 
 const LS_KEY = "anistudio2d:session:v1";
 
@@ -99,6 +101,33 @@ export function App() {
     const id = window.setTimeout(() => setToastGone(true), 3600);
     return () => window.clearTimeout(id);
   }, [toast?.id]);
+
+  // ------------------------------------------------------------------ paste art
+  // A screenshot pasted straight onto the stage becomes part of the character — the fastest way
+  // to get your own drawing in.
+  useEffect(() => {
+    const onPaste = async (e: ClipboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el && /^(input|textarea)$/i.test(el.tagName)) return;
+      const files = Array.from(e.clipboardData?.files ?? []).filter(isImageFile);
+      if (!files.length) return;
+      e.preventDefault();
+      const s = useStudio.getState();
+      let welded = 0;
+      for (const file of files) {
+        try {
+          const art = await readImageFile(file);
+          const slot = s.slotArm ?? (guessSlot(art.name) ?? undefined);
+          if (s.importArt(art, { slot })) welded++;
+        } catch (err) {
+          s.notify((err as Error).message, "warn");
+        }
+      }
+      if (welded) s.notify(`${welded} pasted drawing${welded === 1 ? "" : "s"} welded onto the rig`, "ok");
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, []);
 
   // ----------------------------------------------------------------- shortcuts
   useEffect(() => {

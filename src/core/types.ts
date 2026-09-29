@@ -1,4 +1,6 @@
 import type { Ease, Vec } from "./math";
+import type { BackdropImage } from "./backgrounds";
+import type { SlotId } from "./slots";
 
 /** A bone: a joint at its start, `length` long, resting at `rest` relative to its parent. */
 export interface Bone {
@@ -18,6 +20,8 @@ export interface Bone {
   /** Visual thickness of the drawn bone. */
   w?: number;
   hide?: boolean;
+  /** Character slot this bone belongs to (body / head / arms / legs …). */
+  slot?: SlotId;
 }
 
 export interface Keyframe {
@@ -64,6 +68,13 @@ export interface ShapePart {
   z: number;
   /** Part factory id, so parts can be re-fit when a bone is resized. */
   kind?: string;
+  /** Which character slot this piece fills — the studio's “what is this?” label. */
+  slot?: SlotId;
+  /**
+   * An imported drawing (PNG/JPG/SVG kept as a data URL). Shapes carrying one are drawn by
+   * mapping the image onto their four corner points, so they pose exactly like drawn art.
+   */
+  image?: { src: string; w: number; h: number; name?: string };
 }
 
 export interface IKChain {
@@ -138,6 +149,8 @@ export interface SceneObject {
   seed?: number;
   /** Opacity multiplier. */
   opacity?: number;
+  /** Set when a backdrop preset placed this object, so the next preset can replace it. */
+  fromBackdrop?: string;
   visible: boolean;
 }
 
@@ -169,6 +182,8 @@ export interface Light {
   spread?: number;
   /** Follow this object/bone: light tracks its anchor. */
   follow?: string | null;
+  /** Set when a backdrop preset placed this light, so the next preset can replace it. */
+  fromBackdrop?: string;
   visible: boolean;
 }
 
@@ -236,6 +251,10 @@ export interface Scene {
   showLights?: boolean;
   /** Draw scenery objects. */
   showObjects?: boolean;
+  /** Id of the backdrop preset the scene was last styled from (purely cosmetic). */
+  backdrop?: string;
+  /** An imported background image (a painted sky, a photo, an illustration). */
+  bgImage?: BackdropImage;
 }
 
 export const PALETTES: Record<string, Record<RoleKey, string>> = {

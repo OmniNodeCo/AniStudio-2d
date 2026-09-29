@@ -6,7 +6,7 @@
  * That means the demos are 100% normal editable keyframes — scrub to any frame and re-pose.
  */
 import { TAU, rad, wrapPi, type Vec } from "../core/math";
-import { solveFK } from "../core/fk";
+import { solveFK, type RigPose } from "../core/fk";
 import { rotAimAt, solveTo } from "../core/pose-edit";
 import { poseRotations, setPosKey, setRotKey } from "../core/rig";
 import { makeCamera } from "../core/cameras";
@@ -16,18 +16,53 @@ import type { IKChain, Scene } from "../core/types";
 
 const clamp01 = (x: number) => (x < 0 ? 0 : x > 1 ? 1 : x);
 
-function chainOf(scene: Scene, id: string): IKChain {
-  const c = scene.chains.find((x) => x.id === id);
-  if (!c) throw new Error(`missing IK chain: ${id}`);
-  return c;
+/**
+ * Demos are written for a starter rig, but the character on stage can be missing slots — a
+ * legless slime still gets the arm swing and the body bob. Everything below is therefore
+ * tolerant: a missing chain or joint skips that step instead of throwing.
+ */
+function chainOf(scene: Scene, id: string): IKChain | null {
+  return scene.chains.find((x) => x.id === id) ?? null;
 }
 
 function poseAt(scene: Scene, frame: number) {
   return solveFK(scene, poseRotations(scene, frame), frame);
 }
 
+/** Joint/tip position, or null when this character has no such bone. */
+function joint(pose: RigPose, id: string): Vec | null {
+  return pose.pos[id] ?? pose.end[id] ?? null;
+}
+
+/** The same bone on the other side: legUpF → legUpB, armLoB → armLoF. */
+function twinOf(scene: Scene, id: string): string | null {
+  const b = scene.bones.find((x) => x.id === id);
+  if (b?.mirror && scene.bones.some((x) => x.id === b.mirror)) return b.mirror;
+  const flipped = id.endsWith("F") ? `${id.slice(0, -1)}B` : id.endsWith("B") ? `${id.slice(0, -1)}F` : null;
+  return flipped && scene.bones.some((x) => x.id === flipped) ? flipped : null;
+}
+
+/** A chain by name, or the equivalent chain for the rig's other side / other naming. */
+function chainNear(scene: Scene, id: string): IKChain | null {
+  const direct = chainOf(scene, id);
+  if (direct) return direct;
+  const twin = twinOf(scene, id);
+  if (twin) {
+    const t = chainOf(scene, twin);
+    if (t) return t;
+  }
+  // Quadrupeds name their legs front/back rather than near/far: accept any leg chain.
+  const family = /leg|arm|tail|wing|antenna/i.exec(id)?.[0]?.toLowerCase();
+  if (family) return scene.chains.find((c) => c.id.toLowerCase().includes(family)) ?? null;
+  return null;
+}
+
 function bake(scene: Scene, frame: number, rots: Record<string, number>) {
-  for (const [id, r] of Object.entries(rots)) setRotKey(scene, id, frame, r);
+  // Keys for bones this character does not have would show up as orphan dopesheet tracks.
+  for (const [id, r] of Object.entries(rots)) {
+    if (!scene.bones.some((b) => b.id === id)) continue;
+    setRotKey(scene, id, frame, r);
+  }
 }
 
 function bakeRoot(scene: Scene, frame: number, pos: Vec) {
@@ -36,9 +71,10 @@ function bakeRoot(scene: Scene, frame: number, pos: Vec) {
   setPosKey(scene, root.id, frame, { x: pos.x - scene.root.x, y: pos.y - scene.root.y });
 }
 
-/** Bake one IK chain solve into keys at `frame`. */
+/** Bake one IK chain solve into keys at `frame`. Skips (returns null) when the chain is absent. */
 function bakeIK(scene: Scene, frame: number, chainId: string, target: Vec, pole?: Vec | null) {
-  const c = chainOf(scene, chainId);
+  const c = chainNear(scene, chainId);
+  if (!c) return null;
   const pose = poseAt(scene, frame);
   const rots = solveTo(scene, pose, c, target, pole ?? null);
   bake(scene, frame, rots);
@@ -58,9 +94,12 @@ function stepLeg(
   toeLead = 14,
 ) {
   const solved = bakeIK(scene, frame, chainId, target, pole);
-  const ankle = solved.end[lowerId];
-  const flat = rotAimAt(scene, solved, endBoneId, { x: ankle.x + toeLead, y: ankle.y });
-  bake(scene, frame, { [endBoneId]: wrapPi(flat) });
+  if (!solved) return null;
+  const ankle = joint(solved, lowerId);
+  if (ankle && scene.bones.some((x) => x.id === endBoneId)) {
+    const flat = rotAimAt(scene, solved, endBoneId, { x: ankle.x + toeLead, y: ankle.y });
+    bake(scene, frame, { [endBoneId]: wrapPi(flat) });
+  }
   void upperId;
   return solved;
 }
@@ -103,13 +142,16 @@ function walkCycle(scene: Scene) {
       const a = p + off;
       const lift = clamp01(Math.sin(a - Math.PI)) * 24;
       const pose = poseAt(scene, frame);
-      const hip = pose.pos[`legUp${side}`];
+      const hip = joint(pose, `legUp${side}`);
+      if (!hip) continue;
       const target = { x: hip.x + 26 * Math.cos(a) + 4, y: ankleY - lift };
       // Pole pushes the knee forward so it never bends backwards.
       const pole = { x: hip.x + 34, y: (hip.y + target.y) / 2 };
       const solved = bakeIK(scene, frame, `leg${side}`, target, pole);
+      if (!solved) continue;
       // Keep the sole flat on the ground, with a little toe lift on push-off.
-      const ankle = solved.end[`legLo${side}`];
+      const ankle = joint(solved, `legLo${side}`);
+      if (!ankle || !scene.bones.some((b) => b.id === `foot${side}`)) continue;
       const flat = rotAimAt(scene, solved, `foot${side}`, { x: ankle.x + 20, y: ankle.y - 1 });
       bake(scene, frame, { [`foot${side}`]: wrapPi(flat + rad(3 * Math.max(0, -Math.sin(a)))) });
     }
@@ -128,7 +170,8 @@ function wave(scene: Scene) {
       ["L", -1],
       ["R", 1],
     ] as const) {
-      const hip = pose.pos[`th${side}`];
+      const hip = joint(pose, `th${side}`);
+      if (!hip) continue;
       bakeIK(scene, frame, `leg${side}`, { x: hip.x + dir * 19, y: ground - 8 }, { x: hip.x + dir * 40, y: hip.y + 46 });
     }
   }
@@ -151,13 +194,15 @@ function wave(scene: Scene) {
     });
     // Right arm: hand travels a small arc next to the head — the wave.
     const pose = poseAt(scene, frame);
-    const sh = pose.pos.shR ?? pose.root;
+    const sh = joint(pose, "shR") ?? pose.root;
     const target = { x: sh.x + 40 + 15 * Math.sin(w), y: sh.y - 30 + 9 * Math.cos(w) };
     const solved = bakeIK(scene, frame, "armChainR", target, null);
-    const wrist = solved.end.foreR;
-    const foreEnd = solved.pos.foreR;
+    const wrist = solved ? joint(solved, "foreR") : null;
+    const foreEnd = solved ? joint(solved, "foreR") : null;
     // Keep the "hand" ball aimed along the forearm.
-    bake(scene, frame, { handR: rotAimAt(scene, solved, "handR", { x: wrist.x + (wrist.x - foreEnd.x), y: wrist.y + (wrist.y - foreEnd.y) }) });
+    if (solved && wrist && foreEnd && scene.bones.some((b) => b.id === "handR")) {
+      bake(scene, frame, { handR: rotAimAt(scene, solved, "handR", { x: wrist.x + (wrist.x - foreEnd.x), y: wrist.y + (wrist.y - foreEnd.y) }) });
+    }
   }
 }
 
@@ -255,7 +300,8 @@ function prowl(scene: Scene) {
       { chain: "backLeg", up: "backUp", lo: "backLo", paw: "backPaw", off: Math.PI },
     ]) {
       const pose = poseAt(scene, frame);
-      const hip = pose.pos[leg.up];
+      const hip = joint(pose, leg.up);
+      if (!hip) continue;
       const a = p + leg.off;
       const lift = clamp01(Math.sin(a - Math.PI)) ** 1.2 * 16;
       stepLeg(
@@ -303,20 +349,23 @@ function slash(scene: Scene) {
     });
     // Sword arm: hand sweeps a wide arc from over the shoulder to across the body.
     const pose = poseAt(scene, frame);
-    const sh = pose.pos.armUpF ?? pose.root;
+    const sh = joint(pose, "armUpF") ?? pose.root;
     const sweep = Math.sin(p * 2 - 0.5);
     const target = { x: sh.x + 16 + 26 * sweep, y: sh.y - 30 + 26 * Math.cos(p * 2 - 0.5) };
     const solved = bakeIK(scene, frame, "armF", target, sh.y < target.y ? { x: sh.x + 30, y: sh.y - 6 } : { x: sh.x + 26, y: sh.y + 10 });
-    const wrist = solved.pos.handF ?? solved.end.armLoF;
-    const fore = solved.end.armLoF;
-    bake(scene, frame, { sword: rotAimAt(scene, solved, "sword", { x: fore.x + (fore.x - wrist.x), y: fore.y + (fore.y - wrist.y) - 40 * cut }) });
+    const wrist = solved ? joint(solved, "handF") ?? joint(solved, "armLoF") : null;
+    const fore = solved ? joint(solved, "armLoF") : null;
+    if (solved && wrist && fore && scene.bones.some((b) => b.id === "sword")) {
+      bake(scene, frame, { sword: rotAimAt(scene, solved, "sword", { x: fore.x + (fore.x - wrist.x), y: fore.y + (fore.y - wrist.y) - 40 * cut }) });
+    }
     // Stance: feet stay planted, knees take the weight shift.
     for (const leg of [
       { chain: "legF", up: "legUpF", lo: "legLoF", foot: "footF", dir: -1 },
       { chain: "legB", up: "legUpB", lo: "legLoB", foot: "footB", dir: 1 },
     ]) {
       const pv = poseAt(scene, frame);
-      const hip = pv.pos[leg.up];
+      const hip = joint(pv, leg.up);
+      if (!hip) continue;
       stepLeg(
         scene,
         frame,
@@ -401,18 +450,21 @@ function cast(scene: Scene) {
       armLoB: rad(-26 - 18 * rise),
     });
     const pose = poseAt(scene, frame);
-    const sh = pose.pos.armUpF ?? pose.root;
+    const sh = joint(pose, "armUpF") ?? pose.root;
     // Hand lifts the staff overhead: a straight rise with a little overshoot.
     const target = { x: sh.x + 10 + 16 * rise, y: sh.y - 8 - 52 * rise };
     const solved = bakeIK(scene, frame, "armF", target, rise > 0.4 ? { x: sh.x + 34, y: sh.y + 6 } : { x: sh.x + 34, y: sh.y + 30 });
-    const hand = solved.end.armLoF;
-    bake(scene, frame, { staff: rotAimAt(scene, solved, "staff", { x: hand.x - 6 - 6 * rise, y: hand.y - 40 - 30 * rise }) });
+    const hand = solved ? joint(solved, "armLoF") : null;
+    if (solved && hand && scene.bones.some((b) => b.id === "staff")) {
+      bake(scene, frame, { staff: rotAimAt(scene, solved, "staff", { x: hand.x - 6 - 6 * rise, y: hand.y - 40 - 30 * rise }) });
+    }
     for (const leg of [
       { chain: "legF", up: "legUpF", lo: "legLoF", foot: "footF", dir: -1 },
       { chain: "legB", up: "legUpB", lo: "legLoB", foot: "footB", dir: 1 },
     ]) {
       const pv = poseAt(scene, frame);
-      const hip = pv.pos[leg.up];
+      const hip = joint(pv, leg.up);
+      if (!hip) continue;
       stepLeg(
         scene,
         frame,

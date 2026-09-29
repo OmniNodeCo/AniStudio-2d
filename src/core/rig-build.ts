@@ -6,6 +6,7 @@ import { D2R, wrapPi } from "./math";
 import { buildPart, flipPtsX, rotatePts, translatePts } from "./parts";
 import { emptyTrack } from "./rig";
 import { PALETTES, type Bone, type IKChain, type RoleKey, type Scene, type ShapePart } from "./types";
+import type { SlotId } from "./slots";
 
 export interface BoneDef {
   id: string;
@@ -24,6 +25,8 @@ export interface BoneDef {
   m?: string;
   /** Draw thickness. */
   w?: number;
+  /** Character slot this bone fills (set by the blueprint filter, or authored by hand). */
+  slot?: SlotId;
 }
 
 export interface ChainDef {

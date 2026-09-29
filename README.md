@@ -14,7 +14,7 @@ npm run dev     # → http://localhost:5173  (open it in the preview)
 Other scripts: `npm run build` (typecheck + production bundle), `npm run typecheck`, and the
 headless checks below.
 
-## The four-mode idea
+## The five-mode idea
 
 | Mode | What you do |
 | --- | --- |
@@ -24,10 +24,69 @@ headless checks below.
 | **4 · Draw** | Freehand lasso on the canvas. The outline is simplified, closed and welded to the bone underneath — instant custom art. |
 | **5 · Set** | Place **cameras**, **lights** and **scenery**, and turn the character on the spot. Cameras frame the stage and own *shots*; lights tint the backdrop and glow over the art; scenery paints behind or in front of the character. |
 
+## Build your own character (Build tab)
+
+A character is a **body plan** plus the **slots** you switch on. Pick one of the eight starter
+rigs as a plan, then decide what it has — nothing but the **body** is required:
+
+| Slot | Gives you | Optional? |
+| --- | --- | --- |
+| **Body** | trunk, hips, spine — the root of the skeleton | **required** |
+| Head · Eyes · Mouth · Hair · Ears | neck, head and the face art that hangs off it | optional |
+| Arms · Hands | upper arm + forearm with IK, and what is on the end | optional |
+| Legs · Feet | thigh + shin with IK, and what is on the end | optional |
+| Tail · Wings | extra chains with follow-through | optional |
+| Prop | one extra bone you can parent anywhere (sword, hat, staff, cape) | optional |
+
+Each slot picks its own art source: **starter art** (the rig's own art), a **premade part** from
+the library, **I'll sketch it** (Draw mode targets that slot), **I'll import it** (see below) or
+**no art** (bones stay, so you can animate an invisible limb). Slots that follow others are
+resolved for you — switch the legs off and the feet go with them, and the panel says so.
+
+- **Build the character** rebuilds the rig from your plan. A plan that matches the starter rig
+  keeps its demo animation; a trimmed one gets only the keys its bones can play (a legless slime
+  still gets the arm swing and the body bob — every demo degrades instead of failing).
+- **On stage** you can change your mind: every chip in *This character* adds or removes a slot on
+  the live rig, with its bones, IK chain and art, leaving your keyframes alone. Removing a limb
+  re-parents whatever hung off it.
+- Bones and parts remember what they are (`slot` in the project file), the **Part inspector** has a
+  *what is this?* menu, and **weld to slot** re-parents a drawing onto that slot's bone without
+  moving it on screen.
+
+## Import your own drawings (Import tab)
+
+Draw in any app, export a PNG, and drop it on the character. Imports are welded to a bone and pose
+like every other part — they are stored inside the project file (as data URLs), so a saved project
+reopens with your art.
+
+- Drag a PNG/JPG/SVG anywhere onto the stage, **paste a screenshot** with Ctrl/⌘+V, or use the
+  Import tab. SVG is rasterised once so the rig, the thumbnails and every export see the same pixels.
+- Filenames do the labelling: `nibbles-legs.png` lands on the legs, `hero-head.svg` on the head,
+  `cape.png` in the prop slot. Anything else goes to the bone you selected, or the slot you *armed*.
+- Every import in the list has fit/anchor buttons (start · centre · end, bigger/smaller), its own
+  slot menu and a parent-bone menu. Pose them like drawn art: drag to move, `Alt`-drag to rotate,
+  `Shift`-drag to scale.
+
+## Backdrops (Backdrop tab)
+
+Fourteen ready-made skies — studio grey, dawn meadow, bright day, sunset beach, night city, deep
+space, snowy peaks, deep forest, desert mesa, underwater, village evening, lava cave, paper white,
+neon arcade. Clicking one applies the sky gradient, ground line and light tint; the scenery and
+lights that ship with it can be included or skipped (**sky only**), and **+ props** adds them on top
+of a set you built yourself.
+
+- **Import a background image** (PNG/JPG/SVG) with fit (cover/contain/stretch), opacity, haze,
+  haze colour, parallax, vertical nudge and mirroring. The maths is resolution independent, so what
+  you frame is what a 4K render gets — and `parallax` slides the plate against the camera.
+- **Save what you built** stores the current sky, ground, scenery and lights as your own preset
+  (kept in this browser), so you can reuse it in the next scene.
+- Transparent exports leave the backdrop out entirely: sky and image are skipped, only the
+  character is rendered.
+
 ## Characters
 
-Eight ready-to-animate rigs (Scene tab), each with its own palette, IK chains and a procedural
-demo you can overwrite:
+Eight ready-to-animate rigs (Build tab → body plan), each with its own palette, IK chains and a
+procedural demo you can overwrite:
 
 | Rig | What it shows off |
 | --- | --- |
@@ -111,14 +170,18 @@ src/core/        the studio engine — no React, no DOM, all pure + testable
   pose-edit.ts     "solve this chain to that point", limit-aware aiming, snapshots
   rig-build.ts     tiny JSON rig DSL + buildScene (what the presets and .json loads use)
   parts.ts         part library (procedural polygons), transforms
+  slots.ts         character blueprint: what each bone/part IS, which slots are optional
+  images.ts        decoded-import cache + image↔bone sizing (no DOM)
+  backgrounds.ts   backdrop presets (sky + scenery recipe) and background-image maths
   hit.ts           canvas hit-testing: handles → joints → art → bones
   render.ts        camera, backdrop, parts, rig overlay, onion skin, shadows
   shots.ts         offscreen frame renderer + motion bounds, shared by the exporters
 src/presets/     rigs.ts (kid / cat / ninja / robot / dragon / bird / wizard / blob / blank)
                  demos.ts (procedural keys + ready-made set & camera rigs)
 src/state/       store.ts — one zustand store: scene + tool state, undo/redo, live buffer
-src/components/  Topbar · Stage · Timeline · Docks (parts/rig/scene + inspectors) · ExportPanel · HelpModal
-src/io/          export.ts (gif/png-zip/sheet/still/webm/project) · project.ts
+src/components/  Topbar · Stage · Timeline · Docks (build/parts/import/rig/backdrop/set/style + inspectors)
+                 Deck (BuildPanel, ImportPanel, BackgroundPanel, StyleWorkshop) · ExportPanel · HelpModal
+src/io/          export.ts (gif/png-zip/sheet/still/webm/project) · import.ts (file → data URL)
 scripts/         headless checks + contact-sheet renderer (no browser needed)
 ```
 
@@ -128,7 +191,7 @@ The core has no browser dependency, so the risky parts are verified in Node with
 
 ```bash
 npx esbuild scripts/store-check.ts --bundle --platform=node --format=cjs --outfile=.tmp/store-check.cjs --log-level=warning \
-  && node .tmp/store-check.cjs      # every store action the UI calls: ~70 assertions
+  && node .tmp/store-check.cjs      # every store action the UI calls, incl. the builder/imports/backdrops: 168 assertions
 
 npx esbuild scripts/export-check.ts --bundle --platform=node --format=cjs --external:@napi-rs/canvas --outfile=.tmp/export-check.cjs --log-level=warning \
   && node .tmp/export-check.cjs     # real GIF/zip/sheet/still bytes + project round-trip, all four rigs
@@ -139,6 +202,9 @@ npx esbuild scripts/interact-check.ts --bundle --platform=node --format=cjs --ou
 
 npx esbuild scripts/scene-check.ts --bundle --platform=node --format=cjs --external:@napi-rs/canvas --outfile=.tmp/scene-check.cjs --log-level=warning \
   && node .tmp/scene-check.cjs      # scenery + lights + cameras on every rig: renders .tmp/set-sheet.png
+
+npx esbuild scripts/build-check.ts --bundle --platform=node --format=cjs --external:@napi-rs/canvas --outfile=.tmp/build-check.cjs --log-level=warning \
+  && node .tmp/build-check.cjs      # slots/blueprints, imported drawings, backdrops: renders .tmp/build-sheet.png
                                     # and .tmp/set-camera-frame.png, and exports through the lens
 
 npx esbuild scripts/preview.ts --bundle --platform=node --format=esm --external:@napi-rs/canvas --outfile=.tmp/preview.mjs --log-level=warning \
@@ -148,7 +214,7 @@ npx esbuild scripts/preview.ts --bundle --platform=node --format=esm --external:
 ## CI & releases
 
 - **`.github/workflows/build.yml`** — on every push to `main` and every PR: typecheck, the four
-  headless suites (store, exports, interaction, set/camera), `vite build`, then a smoke test that serves `dist/` with `vite preview` and
+  headless suites (store, exports, interaction, set/camera, character builder), `vite build`, then a smoke test that serves `dist/` with `vite preview` and
   asserts `index.html` and every hashed asset come back. A second job runs the same suites on
   macOS and Windows (that is where the `@napi-rs/canvas` platform binary gets exercised). Uploads
   the site bundle and a contact-sheet preview as artifacts. After those checks pass, a desktop
@@ -218,7 +284,7 @@ Node 22 is what CI uses (`vite 7` needs Node ≥ 20.19).
 `F` fit character · `Shift+F` fit the whole set · `5` Set mode · `L` loop ·
 `B/H/N/G` bones/handles/names/grid · `Enter` finish a drawn shape · `Esc` cancel ·
 `Del` delete selected keys or part · `Ctrl+Z`/`Ctrl+Shift+Z` undo/redo · `Ctrl+C/V` copy/paste pose ·
-`?` help.
+`Ctrl/⌘+V` on the canvas imports a pasted screenshot as art · `?` help.
 
 While dragging: `Shift` snaps (15° rotations, ground-aligned root moves) · in Art mode `Alt`
 rotates the part you grabbed and `Shift` scales it · in Rig mode dragging out from any joint grows
@@ -228,5 +294,10 @@ middle-drag (or `Space`+drag) pans · double-click (or `Enter`) closes a drawn s
 
 ## Project file
 
-`{ app: "AniStudio2D", version: 1, scene: { rigId, name, root, rootRot, frames, fps, loop, bones[], tracks{}, shapes[], chains[], objects[], lights[], cameras[], activeCamera, palettes… }, poses[] }`
+`{ app: "AniStudio2D", version: 1, scene: { rigId, name, root, rootRot, frames, fps, loop, bones[], tracks{}, shapes[], chains[], objects[], lights[], cameras[], activeCamera, backdrop, bgImage, palettes… }, poses[] }`
 — plain JSON, so you can also generate animations from a script and drop the file back in.
+
+Each `Bone` carries an optional `slot` tag and each `ShapePart` an optional `slot`, an `image`
+(`{ src, w, h, name }` — the imported drawing itself, as a data URL), `role`/`fill` and a `z` order.
+That is the whole trick behind the builder: the studio knows what every piece *is* and where it
+belongs, which is what makes slots optional and imports poseable.

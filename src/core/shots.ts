@@ -100,7 +100,7 @@ export function drawShot(ctx: CanvasRenderingContext2D, scene: Scene, frame: num
   const box = o.box ?? sceneBounds(scene, pose);
   const view = frameView(scene, frame, o, box);
   const k = 1 / view.cam.zoom;
-  paintBackdrop(ctx, scene, o.w, o.h, o.transparent);
+  paintBackdrop(ctx, scene, o.w, o.h, o.transparent, view);
   applyCamera(ctx, view, 1);
   if (!o.transparent) drawLightWash(ctx, scene, pose, frame, view);
   drawObjects(ctx, scene, frame, "back", { k });

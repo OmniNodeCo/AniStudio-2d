@@ -81,7 +81,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .tmp
-          for check in store-check export-check interact-check scene-check; do
+          for check in store-check export-check interact-check scene-check build-check; do
             npm exec --silent -- esbuild "scripts/$check.ts" --bundle --platform=node --format=cjs \
               --external:@napi-rs/canvas --outfile=".tmp/$check.cjs" --log-level=warning
             node ".tmp/$check.cjs" | tee -a "$GITHUB_STEP_SUMMARY"

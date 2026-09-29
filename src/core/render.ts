@@ -5,6 +5,8 @@ import { poleHandle } from "./ik";
 import { indexScene } from "./rig";
 import { cameraCorners, pickActive, sampleCamera } from "./cameras";
 import { buildObject, objectTransform, shade } from "./scenery";
+import { paintBackdropImage } from "./backgrounds";
+import { getImage } from "./images";
 import type { Scene, ShapePart } from "./types";
 
 export interface Cam {
@@ -165,8 +167,19 @@ export function drawForegroundGuides(
   }
 }
 
-/** Flat paint of the background, drawn in screen space. */
-export function paintBackdrop(ctx: CanvasRenderingContext2D, scene: Scene, w: number, h: number, transparent = false) {
+/**
+ * Flat paint of the background, drawn in screen space: the sky gradient, then an imported
+ * background image on top if the scene has one. `view` is only needed so a parallax backdrop
+ * can slide against the camera; without it the image is locked to the frame.
+ */
+export function paintBackdrop(
+  ctx: CanvasRenderingContext2D,
+  scene: Scene,
+  w: number,
+  h: number,
+  transparent = false,
+  view?: View,
+) {
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   if (transparent) {
@@ -178,8 +191,16 @@ export function paintBackdrop(ctx: CanvasRenderingContext2D, scene: Scene, w: nu
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, w, h);
   }
+  // A transparent export is "just the character": no sky, no backdrop image, no haze.
+  if (scene.bgImage && !transparent) {
+    const source = getImage(BACKDROP_IMAGE_ID);
+    if (source) paintBackdropImage(ctx, scene, w, h, source, view);
+  }
   ctx.restore();
 }
+
+/** Cache key for the scene's imported backdrop (one backdrop per scene). */
+export const BACKDROP_IMAGE_ID = "__backdrop__";
 
 /** Soft contact shadow that follows the root — cheap, but makes poses feel planted. */
 export function drawShadow(ctx: CanvasRenderingContext2D, scene: Scene, pose: RigPose, alpha = 1) {
@@ -224,7 +245,7 @@ export function drawParts(ctx: CanvasRenderingContext2D, scene: Scene, pose: Rig
       const pts = shapeWorldPoints(s, pose);
       if (pts.length < 2) continue;
       ctx.lineWidth = (s.strokeWidth ?? 3) * 2;
-      tracePoly(ctx, pts, s.closed, !s.sharp);
+      traceShape(ctx, s, pts);
       ctx.stroke();
     }
     ctx.restore();
@@ -236,6 +257,20 @@ export function drawParts(ctx: CanvasRenderingContext2D, scene: Scene, pose: Rig
   for (const s of shapes) {
     const pts = shapeWorldPoints(s, pose);
     if (pts.length < 2) continue;
+    if (s.image && pts.length >= 4 && !flat) {
+      const drawn = drawImagePart(ctx, s, pts, alpha * (s.opacity ?? 1));
+      if (drawn) {
+        if (outlined) {
+          ctx.globalAlpha = alpha;
+          ctx.lineWidth = s.strokeWidth ?? 3;
+          ctx.strokeStyle = s.stroke ?? scene.outline;
+          traceShape(ctx, s, pts);
+          ctx.stroke();
+        }
+        continue;
+      }
+      // Decoding failed or is still in flight: fall through to the placeholder quad below.
+    }
     tracePoly(ctx, pts, s.closed, !s.sharp);
     if (flat) {
       ctx.fillStyle = o.silhouette as string;
@@ -243,6 +278,11 @@ export function drawParts(ctx: CanvasRenderingContext2D, scene: Scene, pose: Rig
       continue;
     }
     ctx.globalAlpha = alpha * (s.opacity ?? 1);
+    if (s.image) {
+      // An imported drawing that has not decoded yet: a hatched plate, never a blank hole.
+      drawImagePlaceholder(ctx, pts, scene.outline);
+      continue;
+    }
     ctx.fillStyle = fillOf(scene, s);
     ctx.fill();
     if (outlined) {
@@ -268,6 +308,70 @@ export function drawParts(ctx: CanvasRenderingContext2D, scene: Scene, pose: Rig
     }
     ctx.restore();
   }
+}
+
+/* --------------------------------------------------------- imported art */
+
+/**
+ * Trace a part's outline. Drawn shapes get soft corners (that is what makes the cartoon look);
+ * an imported drawing is a rectangle by definition, so its outline follows the four corners
+ * exactly instead of being smoothed into a smaller box.
+ */
+function traceShape(ctx: CanvasRenderingContext2D, s: ShapePart, pts: Vec[]) {
+  if (s.image && pts.length >= 3) {
+    ctx.beginPath();
+    pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    ctx.closePath();
+    return;
+  }
+  tracePoly(ctx, pts, s.closed, !s.sharp);
+}
+
+/**
+ * Draw an imported image mapped onto a part's quad: point 0 is the top-left corner, 1 the
+ * top-right, 3 the bottom-left. Using `transform` (rather than setTransform) keeps whatever
+ * camera the caller has already applied, so imports pose, pan and zoom like drawn art.
+ */
+export function drawImagePart(ctx: CanvasRenderingContext2D, s: ShapePart, pts: Vec[], alpha = 1): boolean {
+  const source = getImage(s.id);
+  if (!source || pts.length < 4) return false;
+  const [p0, p1, , p3] = pts;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.imageSmoothingEnabled = true;
+  ctx.transform(p1.x - p0.x, p1.y - p0.y, p3.x - p0.x, p3.y - p0.y, p0.x, p0.y);
+  ctx.drawImage(source as CanvasImageSource, 0, 0, 1, 1);
+  ctx.restore();
+  return true;
+}
+
+/** Hatching shown while an imported drawing decodes (or if it never does). */
+export function drawImagePlaceholder(ctx: CanvasRenderingContext2D, pts: Vec[], outline: string) {
+  const p0 = pts[0];
+  const w = Math.hypot(pts[1].x - p0.x, pts[1].y - p0.y);
+  const h = Math.hypot(pts[3].x - p0.x, pts[3].y - p0.y);
+  ctx.save();
+  ctx.fillStyle = "rgba(255,255,255,0.14)";
+  tracePoly(ctx, pts, true, false);
+  ctx.fill();
+  ctx.clip();
+  ctx.strokeStyle = "rgba(255,255,255,0.22)";
+  ctx.lineWidth = Math.max(1, Math.min(w, h) / 26);
+  ctx.beginPath();
+  const span = w + h;
+  for (let d = -h; d < span; d += Math.max(6, Math.min(w, h) / 7)) {
+    ctx.moveTo(p0.x + d, p0.y);
+    ctx.lineTo(p0.x + d + h, p0.y + h);
+  }
+  ctx.stroke();
+  ctx.restore();
+  ctx.save();
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([6, 4]);
+  tracePoly(ctx, pts, true, false);
+  ctx.stroke();
+  ctx.restore();
 }
 
 /* --------------------------------------------------- skeleton + handles */

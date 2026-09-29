@@ -7,23 +7,33 @@ const STEPS: { icon: string; title: string; body: string }[] = [
     body: "You are in Pose mode. Grab a coloured ring — that is an IK handle. Move a hand or a foot and the whole limb follows (elbows and knees obey their bend limits). Let go and the pose is keyed automatically.",
   },
   {
-    icon: "▲",
-    title: "2 · Drop parts on bones",
-    body: "Open Parts on the left and drag a head, arm or sword onto the character. It welds itself to whichever bone you drop it on, then rides that bone forever. Draw your own shapes in Draw mode.",
+    icon: "⚒",
+    title: "2 · Build the character",
+    body: "The Build tab is the character sheet. Pick a body plan, then switch slots on or off: body, head, eyes, mouth, hair, ears, arms, hands, legs, feet, tail, wings, prop. Only the body is required — a legless slime is one click. Each slot can take the starter art, a premade part, your own sketch or an imported drawing.",
+  },
+  {
+    icon: "⭳",
+    title: "3 · Import your own art",
+    body: "Drag a PNG, JPG or SVG anywhere onto the stage (or paste a screenshot with Ctrl/V) and it welds to the bone you dropped it on — it poses, exports and saves with the project. Filenames label the slot: hero-legs.png lands on the legs. The Import tab lists everything with fit, anchor and parent controls.",
+  },
+  {
+    icon: "🏞",
+    title: "4 · Backdrops",
+    body: "The Backdrop tab has ready-made skies — dawn meadow, night city, snowy peaks, lava cave — that can bring their own scenery and lighting. Or import your own background image and tune fit, haze, parallax and mirroring. Save whatever you build as your own preset for the next scene.",
   },
   {
     icon: "▶",
-    title: "3 · Key poses, then scrub",
+    title: "5 · Key poses, then scrub",
     body: "The dopesheet below has one row per bone. Drag keyframes sideways, press K to key the whole rig, use ease menus, and play with Space. Onion skin shows the frames before/after in pink/cyan.",
   },
   {
     icon: "🎥",
-    title: "4 · Build the set",
+    title: "6 · Build the set",
     body: "Set mode places cameras, lights and scenery. Drop hills, trees and buildings on the ground, add a warm light or a torch that follows a hand, then snap a camera to your view. Cameras own shots — the timeline loops inside the shot you are standing in, and exports can render through the lens.",
   },
   {
     icon: "⤒",
-    title: "5 · Export",
+    title: "7 · Export",
     body: "GIF, PNG sequence, sprite sheet (with TexturePacker json), WebM or the project file itself. Pick the framing — tight on the character, cinematic through the camera, or steady for the whole shot. Everything you made is plain keyframes, so any tool can read it.",
   },
 ];
@@ -36,7 +46,7 @@ export function HelpModal() {
     <div className="modal-bg" onClick={() => a.toggleFlag("showHelp")}>
       <div className="modal wide" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
-          <h3>AniStudio 2D in four steps</h3>
+          <h3>AniStudio 2D in seven steps</h3>
           <button className="mini" onClick={() => a.toggleFlag("showHelp")}>
             ✕
           </button>
@@ -54,6 +64,7 @@ export function HelpModal() {
           <b>shortcuts</b>
           {[
             ["1 / 2 / 3 / 4 / 5", "Pose · Rig · Art · Draw · Set"],
+            ["Ctrl/⌘ + V", "paste a drawing onto the character"],
             ["Space", "play / pause"],
             ["← →", "step frame (shift = 5)"],
             ["K", "key the whole rig here"],
